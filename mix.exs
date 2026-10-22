@@ -2,7 +2,7 @@ defmodule QueueKeeperCheck.MixProject do
   use Mix.Project
 
   @version "0.1.0"
-  @source_url "https://github.com/TitaniumMonkey/queue_keeper_check"
+  @source_url "https://github.com/TitaniumMonkey/Queue-keeper-check"
 
   def project do
     [

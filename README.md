@@ -1,6 +1,6 @@
 # queue_keeper_check
 
-[![CI](https://github.com/TitaniumMonkey/queue_keeper_check/actions/workflows/ci.yml/badge.svg)](https://github.com/TitaniumMonkey/queue_keeper_check/actions/workflows/ci.yml)
+[![CI](https://github.com/TitaniumMonkey/Queue-keeper-check/actions/workflows/ci.yml/badge.svg)](https://github.com/TitaniumMonkey/Queue-keeper-check/actions/workflows/ci.yml)
 
 Read-only health check for [Oban](https://github.com/oban-bg/oban) queues. It runs aggregate
 queries on `oban_jobs` and reports eight conditions with thresholds:
@@ -61,7 +61,7 @@ Add the dependency to `mix.exs` (requires Elixir 1.15+, Oban 2.18+, `ecto_sql` 3
 ```elixir
 def deps do
   [
-    {:queue_keeper_check, github: "TitaniumMonkey/queue_keeper_check", tag: "v0.1.0"}
+    {:queue_keeper_check, github: "TitaniumMonkey/Queue-keeper-check", tag: "v0.1.0"}
   ]
 end
 ```

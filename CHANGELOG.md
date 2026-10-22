@@ -20,5 +20,5 @@ All notable changes to this project are documented here. The format follows
   outside Oban (e.g. system cron).
 - Support for Oban's Basic (PostgreSQL), Lite (SQLite3) and Dolphin (MySQL 8.4+) engines.
 
-[Unreleased]: https://github.com/TitaniumMonkey/queue_keeper_check/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/TitaniumMonkey/queue_keeper_check/releases/tag/v0.1.0
+[Unreleased]: https://github.com/TitaniumMonkey/Queue-keeper-check/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/TitaniumMonkey/Queue-keeper-check/releases/tag/v0.1.0
