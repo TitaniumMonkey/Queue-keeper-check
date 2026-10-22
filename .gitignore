@@ -1,0 +1,12 @@
+/_build/
+/deps/
+/cover/
+/doc/
+/tmp/
+/.mysql/
+/.elixir_ls/
+/.fetch
+erl_crash.dump
+*.ez
+queue_keeper_check-*.tar
+.DS_Store
