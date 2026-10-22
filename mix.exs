@@ -35,14 +35,14 @@ defmodule QueueKeeperCheck.MixProject do
         "Website" => "https://queuekeeper.dev",
         "Changelog" => "#{@source_url}/blob/main/CHANGELOG.md"
       },
-      files: ~w(lib mix.exs README.md LICENSE CHANGELOG.md .formatter.exs)
+      files: ~w(lib mix.exs README.md LICENSE CHANGELOG.md SECURITY.md .formatter.exs)
     ]
   end
 
   defp docs do
     [
       main: "readme",
-      extras: ["README.md", "CHANGELOG.md", "LICENSE"],
+      extras: ["README.md", "CHANGELOG.md", "SECURITY.md", "docs/SECURITY_REVIEW.md", "LICENSE"],
       source_ref: "v#{@version}",
       source_url: @source_url
     ]

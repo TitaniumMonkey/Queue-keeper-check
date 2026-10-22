@@ -11,18 +11,36 @@ queries on `oban_jobs` and reports eight conditions with thresholds:
 | `:hanging` | a job is `executing` past its worker's time budget | 300 s, per-worker overrides | warning, critical at 2x |
 | `:backlog` | a queue has too many due jobs, or its oldest due job has waited too long | 1000 jobs / 300 s | warning, critical at 2x |
 | `:stalled` | a queue has overdue jobs and nothing in it was attempted recently (queue not running, paused, or leadership/notifier broken) | latency 300 s + no attempt in 60 s | always critical |
-| `:retry_storm` | one worker has many retrying or retried jobs in a short window | 20 jobs / 300 s | warning, critical at 2x |
+| `:retry_storm` | one worker has many retrying or retried jobs in a short window (completed retries only with `include_completed: true`) | 20 jobs / 300 s | warning, critical at 2x |
 | `:discarded` | discarded-job spike for a worker (silent failures) | 5 / 3600 s | warning, critical at 2x |
 | `:cancelled` | cancelled-job spike for a worker | 10 / 3600 s | warning, critical at 2x |
 | `:cron_missing` | an expected (usually cron) worker has had no job inserted for too long | off until you list workers | always critical |
 
-"Due" means `available`, or `scheduled`/`retryable` whose `scheduled_at` has passed. Job `args`
-are never read. Nothing is sent anywhere; you decide where the report goes.
+"Due" means `available`, or `scheduled`/`retryable` whose `scheduled_at` has passed. Job `args`,
+`meta` and `errors` are never read. Nothing is sent anywhere; you decide where the report goes.
+
+## Safety
+
+* Only `SELECT`s on `oban_jobs` (audited by a test on every engine). On Postgres each
+  check runs in a transaction marked read-only, with `statement_timeout` (5 s),
+  `lock_timeout` (1 s) and a per-check budget (30 s), and the transaction is always rolled
+  back. On MySQL `max_execution_time` is set for the duration of the check.
+* All queries use Oban's standard indexes except the opt-in `:cron_missing` (a sequential
+  scan). On a 10M-row table a full run takes about 2 s.
+* `mix queue_keeper.check` and `QueueKeeperCheck.Release` start only your repo, never your
+  application or Oban.
+* Database errors never raise. A check that cannot complete is reported, and the exit
+  code is 3.
+* Run it with a SELECT-only database user.
+
+See [docs/SECURITY_REVIEW.md](docs/SECURITY_REVIEW.md) for the exact SQL, required
+privileges, measurements and findings, and [SECURITY.md](SECURITY.md) to report a
+vulnerability.
 
 Status: v0.1.0, early. The API may change before 1.0.
 
 > **Pruner caveat (read this first).** Five checks count rows in final states: `:stalled`
-> (recent `attempted_at`), `:retry_storm` (retried jobs that already completed),
+> (recent `attempted_at`), `:retry_storm` (with `include_completed: true`),
 > `:discarded`, `:cancelled` and `:cron_missing`. If you run Oban's Pruner, it deletes
 > `completed`, `cancelled` and `discarded` jobs older than `max_age`, **default 60 seconds**.
 > With that default, the 3600 s spike windows only ever see the last minute, and
@@ -61,7 +79,8 @@ Add the dependency to `mix.exs` (requires Elixir 1.15+, Oban 2.18+, `ecto_sql` 3
 ```elixir
 def deps do
   [
-    {:queue_keeper_check, github: "TitaniumMonkey/Queue-keeper-check", tag: "v0.1.0"}
+    # pin a reviewed commit; tags can be moved
+    {:queue_keeper_check, github: "TitaniumMonkey/Queue-keeper-check", ref: "<commit sha>"}
   ]
 end
 ```
@@ -108,8 +127,11 @@ A check running *inside* Oban can't tell you Oban itself is down; see the next s
 From the shell:
 
 ```
-mix queue_keeper.check --repo MyApp.Repo [--prefix public] [--json]
+mix queue_keeper.check --repo MyApp.Repo [--prefix public] [--json] [--statement-timeout MS] [--lock-timeout MS]
 ```
+
+It compiles the project and loads its config, then starts only the repo (pool of 1);
+your application and Oban are not started.
 
 ### Exit codes
 
@@ -120,10 +142,13 @@ mix queue_keeper.check --repo MyApp.Repo [--prefix public] [--json]
 | 0 | `:ok` | no findings |
 | 1 | `:warning` | at least one finding, none critical |
 | 2 | `:critical` | at least one critical finding |
+| 3 | `:error` | a check could not complete (database unreachable, timeout, missing table or column) or the arguments were invalid; no finding is critical |
 
 Options: each check name takes a keyword list of thresholds (see `QueueKeeperCheck.Config`),
-plus `:prefix` (schema; default `"public"` on Postgres, none on SQLite/MySQL), `:now`
-(evaluation time) and `:only` (subset of checks).
+plus `:prefix` (schema; default `"public"` on Postgres, none on SQLite/MySQL; a plain
+identifier), `:now` (evaluation time), `:only` (subset of checks) and the safety limits
+`:statement_timeout`, `:lock_timeout`, `:check_timeout` (ms) and `:read_only`. Unknown or
+invalid options raise `ArgumentError`. Failed checks are listed in `report.errors`.
 
 ### Missing cron insertions
 
@@ -187,8 +212,8 @@ Each suite runs once per engine.
 
 ```
 mix deps.get
-mix test                 # Postgres + SQLite: 13 cases x 2 engines = 26 tests
-QK_MYSQL=1 mix test      # + MySQL: 13 x 3 = 39 tests
+mix test                 # Postgres + SQLite
+QK_MYSQL=1 mix test      # + MySQL
 mix format --check-formatted
 ```
 
