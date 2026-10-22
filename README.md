@@ -37,7 +37,7 @@ See [docs/SECURITY_REVIEW.md](docs/SECURITY_REVIEW.md) for the exact SQL, requir
 privileges, measurements and findings, and [SECURITY.md](SECURITY.md) to report a
 vulnerability.
 
-Status: v0.2.0, early. The API may change before 1.0.
+Status: v0.2.1, early. The API may change before 1.0.
 
 > **Pruner caveat (read this first).** Five checks count rows in final states: `:stalled`
 > (recent `attempted_at`), `:retry_storm` (with `include_completed: true`),
@@ -84,19 +84,19 @@ the server/session `time_zone` does not matter (verified with the server in UTC-
 
 Requires Elixir 1.15+, Oban 2.18+, `ecto_sql` 3.10+.
 
-**Not yet published to Hex.** Install it from GitHub, pinned to the release tag:
+Add the dependency to `mix.exs`:
 
 ```elixir
 def deps do
   [
-    {:queue_keeper_check, github: "TitaniumMonkey/Queue-keeper-check", tag: "v0.2.0"}
+    {:queue_keeper_check, "~> 0.2.1"}
   ]
 end
 ```
 
-Git tags can be moved; for an immutable pin use `ref: "<commit sha>"` (`mix.lock` records
-the commit either way). Once it is on Hex, `{:queue_keeper_check, "~> 0.2"}` will work and
-the package will be checksummed in `mix.lock`.
+Hex packages are checksummed in `mix.lock`. Or straight from GitHub, pinned to the release
+tag (`tag: "v0.2.1"`); git tags can be moved, so for an immutable git pin use
+`ref: "<commit sha>"`.
 
 Your app already brings its own database adapter (`postgrex`, `ecto_sqlite3` or `myxql`).
 

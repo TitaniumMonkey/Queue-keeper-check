@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-10-22
+
+First release published to Hex.
+
 ### Changed
 
 - `:retry_storm` now honours its window for `retryable` jobs too: a `retryable` job counts
@@ -24,7 +28,7 @@ All notable changes to this project are documented here. The format follows
 
 - README: "Piloting safely" (report-only rollout, what to measure, tuning, retention for
   history-based checks); `:stalled` also fires for queues whose slots are all held by
-  long-running jobs; installation from GitHub, since the package is not yet on Hex.
+  long-running jobs.
 - `docs/OBAN_PRO_COMPATIBILITY.md` and an Oban Pro row under "Engine support": likely
   compatible, unverified and untested, with the Pro features known to skew results.
 - `docs/SECURITY_REVIEW.md`: updated `:retry_storm` SQL listing.
@@ -95,6 +99,7 @@ Initial implementation. Not tagged, released or published; superseded by 0.2.0.
   outside Oban (e.g. system cron).
 - Support for Oban's Basic (PostgreSQL), Lite (SQLite3) and Dolphin (MySQL 8.4+) engines.
 
-[Unreleased]: https://github.com/TitaniumMonkey/Queue-keeper-check/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/TitaniumMonkey/Queue-keeper-check/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/TitaniumMonkey/Queue-keeper-check/releases/tag/v0.2.1
 [0.2.0]: https://github.com/TitaniumMonkey/Queue-keeper-check/releases/tag/v0.2.0
 [0.1.0]: https://github.com/TitaniumMonkey/Queue-keeper-check/commit/48b75a1
