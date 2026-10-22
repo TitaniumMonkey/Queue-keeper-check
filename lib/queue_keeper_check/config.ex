@@ -9,7 +9,7 @@ defmodule QueueKeeperCheck.Config do
 
   | check | option | default | meaning |
   |---|---|---|---|
-  | `:orphaned` | `after` | 3600 | executing longer than this = node probably died (matches Oban Lifeline's default `rescue_after` of 60 min) |
+  | `:orphaned` | `after` | 3600 | executing longer than this, far beyond any expected runtime (matches Oban Lifeline's default `rescue_after` of 60 min). Measures execution age only: the job may be orphaned by a node crash, or may still be running |
   | `:hanging` | `default_budget` | 300 | executing longer than the worker's budget |
   | `:hanging` | `budgets` | `%{}` | per-worker budgets, e.g. `%{"MyApp.VideoWorker" => 1800}` |
   | `:backlog` | `max_depth` | 1000 | due jobs (available, or scheduled/retryable whose time has passed) per queue |
@@ -23,9 +23,19 @@ defmodule QueueKeeperCheck.Config do
   | `:cancelled` | `window` / `max` | 3600 / 10 | jobs cancelled in the window, per worker |
   | `:cron_missing` | `expected` | `%{}` (off) | worker => max seconds between insertions, e.g. `%{"MyApp.Nightly" => 90_000}` |
 
-  `:retry_storm` counts, per worker: jobs in `retryable` now, plus jobs `executing`,
-  `discarded` or `cancelled` on attempt >= 2 that were attempted in the window (plus
-  `completed` ones with `include_completed: true`).
+  `:retry_storm` counts, per worker, within the window:
+
+    * `retryable` jobs whose last (failed) attempt started in the window (`attempted_at`;
+      the query also bounds `scheduled_at`, which Oban sets after the attempt, so it can
+      use the composite index),
+    * `executing` jobs on attempt >= 2 attempted in the window (`attempted_at`),
+    * `discarded` / `cancelled` jobs on attempt >= 2 discarded / cancelled in the window
+      (`discarded_at` / `cancelled_at`),
+    * with `include_completed: true`, `completed` jobs on attempt >= 2 attempted in the
+      window (`attempted_at`).
+
+  A job that failed before the window and is still waiting out a long backoff is not
+  counted. (Up to v0.2.0 every `retryable` job counted, whatever the window.)
 
   A finding is `:critical` when the value is at least twice its threshold; `:orphaned`,
   `:stalled` and `:cron_missing` findings are always `:critical`.

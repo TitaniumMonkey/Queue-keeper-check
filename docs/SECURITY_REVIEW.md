@@ -115,8 +115,9 @@ SELECT id FROM oban_jobs WHERE state IN ('scheduled','retryable') AND scheduled_
 SELECT id FROM oban_jobs WHERE state = 'discarded' AND discarded_at >= $n AND queue = $n LIMIT 1
 SELECT id FROM oban_jobs WHERE state = 'cancelled' AND cancelled_at >= $n AND queue = $n LIMIT 1
 SELECT id FROM oban_jobs WHERE state = 'completed' AND scheduled_at >= $n AND attempted_at >= $n AND queue = $n LIMIT 1
--- retry_storm (the completed part only with include_completed: true)
-SELECT worker, queue, count(id) FROM oban_jobs WHERE state = 'retryable' GROUP BY worker, queue
+-- retry_storm (the completed part only with include_completed: true; the retryable part has been
+-- windowed since the release after v0.2.0, before that it was `WHERE state = 'retryable'`)
+SELECT worker, queue, count(id) FROM oban_jobs WHERE state = 'retryable' AND scheduled_at >= $n AND attempted_at >= $n GROUP BY worker, queue
 SELECT worker, queue, count(id) FROM oban_jobs WHERE state = 'executing' AND attempt >= 2 AND attempted_at >= $n GROUP BY worker, queue
 SELECT worker, queue, count(id) FROM oban_jobs WHERE state = 'discarded' AND discarded_at >= $n AND attempt >= 2 GROUP BY worker, queue
 SELECT worker, queue, count(id) FROM oban_jobs WHERE state = 'cancelled' AND cancelled_at >= $n AND attempt >= 2 GROUP BY worker, queue
@@ -258,6 +259,15 @@ never-seen worker.
 Postgres not restarted (its 128 MB of shared buffers stayed warm). Raw outputs and every
 `EXPLAIN (ANALYZE, BUFFERS)` are in [`docs/evidence/perf/`](https://github.com/TitaniumMonkey/Queue-keeper-check/tree/v0.2.0/docs/evidence/perf)
 (`pg_summary.txt`, `pg_explain.txt`, `pg_v0.1.0_baseline_*.txt`).
+
+**Re-run after the windowed `retry_storm` change (Unreleased, 2026-10-22, same box and
+database, one warm run):** `retry_storm` 16.3 ms; full run 1.62 s, 209 statements, 131
+findings (was 1,331: retryable jobs whose failure falls outside the window no longer count);
+1.58 s with default limits, 0 errors. The retryable branch uses the composite index with
+`Index Cond: state = 'retryable' AND scheduled_at >= ...` and filters on `attempted_at`; no
+sequential scans other than the opt-in `:cron_missing`. Raw output:
+`docs/evidence/perf/pg_unreleased_retry_window_{summary,explain}.txt`. The table above
+was not re-measured.
 
 **Root causes in v0.1.0 (from the saved plans):** sample queries
 `... ORDER BY id LIMIT 10` made the planner walk the primary key, filtering 9.5M rows

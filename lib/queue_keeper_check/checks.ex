@@ -22,6 +22,11 @@ defmodule QueueKeeperCheck.Checks do
   # -- executing jobs: orphaned and hanging -----------------------------------------------
   # Aggregated in SQL so the result stays one row per (queue, worker), however many rows
   # are stuck in `executing`. `age >= after` <=> `attempted_at <= now - after`.
+  #
+  # :orphaned measures execution age only. The database does not record which node runs a
+  # job or whether that node is alive, so a job past `after` may be orphaned (its node
+  # crashed or was killed mid-job) or may simply still be running; the finding cannot
+  # tell the two apart.
 
   def orphaned(repo, cfg, now, qopts) do
     limit = cfg[:orphaned][:after]
@@ -40,7 +45,7 @@ defmodule QueueKeeperCheck.Checks do
         value: oldest,
         threshold: limit,
         message:
-          "#{count} job(s) stuck in executing for up to #{oldest}s (limit #{limit}s); the node running them probably died. Oban's Lifeline plugin rescues these.",
+          "#{count} job(s) executing for up to #{oldest}s (limit #{limit}s), far beyond any expected runtime; possibly orphaned by a node crash or shutdown, or genuinely still running. This check measures execution age only; Oban's Lifeline plugin rescues orphaned jobs.",
         job_ids: sample_ids(repo, scoped(base, queue, worker), qopts)
       }
     end
@@ -257,12 +262,22 @@ defmodule QueueKeeperCheck.Checks do
     min = cfg[:retry_storm][:min_retries]
     cutoff = DateTime.add(now, -window, :second)
 
-    # Each part is index-friendly: state-prefixed ranges on the composite index, or the
+    # Every part honors the window. Each is index-friendly: state-prefixed ranges on the
+    # composite (state, queue, priority, scheduled_at, id) index, or the
     # (state, discarded_at) / (state, cancelled_at) indexes. Completed jobs have no index on
     # a timestamp, so counting them is opt-in.
+    #
+    # Retryable jobs count when their last failed attempt started in the window
+    # (`attempted_at >= cutoff`). Oban reschedules a failed job after its attempt
+    # (`scheduled_at = time of failure + backoff`), so `scheduled_at >= cutoff` is implied;
+    # it is repeated so the planner can discard most out-of-window rows inside the
+    # composite index before reading `attempted_at` from the table.
     parts =
       [
-        from(j in Job, where: j.state == "retryable"),
+        from(j in Job,
+          where:
+            j.state == "retryable" and j.scheduled_at >= ^cutoff and j.attempted_at >= ^cutoff
+        ),
         from(j in Job,
           where: j.state == "executing" and j.attempt >= 2 and j.attempted_at >= ^cutoff
         ),
@@ -285,7 +300,7 @@ defmodule QueueKeeperCheck.Checks do
 
     findings_per_worker(rows, min, fn worker, count ->
       {:retry_storm, count, min,
-       "Retry storm in #{worker}: #{count} retrying/retried job(s) in the last #{window}s (limit #{min})."}
+       "Retry storm in #{worker}: #{count} job(s) failed and awaiting retry, or retried, in the last #{window}s (limit #{min})."}
     end)
     |> Enum.map(fn finding ->
       ids =

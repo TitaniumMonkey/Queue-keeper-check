@@ -102,6 +102,11 @@ defmodule QueueKeeperCheck.SharedCases do
 
         assert only(report, :hanging) == []
         assert report.status == :critical
+
+        # the message says what is measured (age), not that the node is known to be dead
+        assert [%Finding{message: message}] = only(report, :orphaned)
+        assert message =~ "far beyond any expected runtime; possibly orphaned by a node crash"
+        assert message =~ "measures execution age only"
       end
 
       test "hanging: per-worker budgets override the default budget" do
@@ -212,6 +217,23 @@ defmodule QueueKeeperCheck.SharedCases do
                ]
       end
 
+      test "stalled: a queue whose only executing jobs started long ago is also reported" do
+        # Documented limitation: every slot busy with one long job (attempted 10 min ago) and
+        # work waiting looks the same as a stopped queue, because nothing was attempted in the
+        # window.
+        insert(state: "executing", queue: "slow", attempted_at: ago(600), completed_at: nil)
+
+        insert_many(3,
+          state: "available",
+          queue: "slow",
+          scheduled_at: ago(400),
+          attempted_at: nil,
+          completed_at: nil
+        )
+
+        assert [%Finding{check: :stalled, queue: "slow"}] = only(run(), :stalled)
+      end
+
       test "stalled: recent discards or completions count as activity, within the lookback" do
         for q <- ["discards", "completes", "ancient"] do
           insert_many(2,
@@ -306,6 +328,55 @@ defmodule QueueKeeperCheck.SharedCases do
                  }
                ] =
                  only(run(retry_storm: [include_completed: true]), :retry_storm)
+      end
+
+      test "retry storm: retryable jobs count only when their failed attempt is in the window" do
+        # failed 20s ago, retry due in 10s: inside the default 300s window
+        insert_many(6,
+          state: "retryable",
+          worker: "Demo.Win",
+          attempt: 2,
+          attempted_at: ago(20),
+          scheduled_at: DateTime.add(@now, 10),
+          completed_at: nil
+        )
+
+        # failed 4000s ago and still waiting out a long backoff (retry due in 1h): outside
+        insert_many(7,
+          state: "retryable",
+          worker: "Demo.Win",
+          attempt: 5,
+          attempted_at: ago(4000),
+          scheduled_at: DateTime.add(@now, 3600),
+          completed_at: nil
+        )
+
+        # failed 4000s ago, retry overdue (scheduled 3990s ago, queue backed up): outside
+        insert_many(8,
+          state: "retryable",
+          worker: "Demo.Win",
+          attempt: 3,
+          attempted_at: ago(4000),
+          scheduled_at: ago(3990),
+          completed_at: nil
+        )
+
+        assert [%Finding{worker: "Demo.Win", count: 6, job_ids: ids}] =
+                 only(run(retry_storm: [min_retries: 5]), :retry_storm)
+
+        assert length(ids) == 6
+
+        # a 10s window excludes the jobs that failed 20s ago too
+        assert [] = only(run(retry_storm: [min_retries: 1, window: 10]), :retry_storm)
+
+        # a window long enough to reach back 4000s counts all 21
+        assert [%Finding{worker: "Demo.Win", count: 21, severity: :critical}] =
+                 only(run(retry_storm: [min_retries: 10, window: 4001]), :retry_storm)
+
+        assert [%Finding{message: message}] =
+                 only(run(retry_storm: [min_retries: 5]), :retry_storm)
+
+        assert message =~ "in the last 300s"
       end
 
       test "retry storm: retried jobs that were discarded, cancelled or are executing count" do

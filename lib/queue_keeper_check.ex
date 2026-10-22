@@ -7,11 +7,14 @@ defmodule QueueKeeperCheck do
 
   Detects eight conditions (see `checks/0` and `QueueKeeperCheck.Config` for thresholds):
 
-  * `:orphaned` - jobs stuck in `executing` far longer than any job should run (dead node)
+  * `:orphaned` - jobs `executing` far longer than any job should run (execution age only;
+    possibly orphaned by a node crash)
   * `:hanging` - jobs executing past their per-worker time budget
   * `:backlog` - too many due jobs, or the oldest due job waiting too long, per queue
-  * `:stalled` - due jobs waiting and nothing in that queue attempted recently (queue stopped)
-  * `:retry_storm` - many retrying/retried jobs for one worker in a short window
+  * `:stalled` - due jobs waiting and nothing in that queue attempted recently (queue stopped,
+    or every slot busy with long-running jobs)
+  * `:retry_storm` - many jobs of one worker failed and awaiting retry, or retried, within a
+    short window
   * `:discarded` - spike of discarded jobs (silent failures)
   * `:cancelled` - spike of cancelled jobs
   * `:cron_missing` - an expected (cron) worker has had no job inserted for too long; opt-in

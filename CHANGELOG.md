@@ -6,9 +6,33 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- `:retry_storm` now honours its window for `retryable` jobs too: a `retryable` job counts
+  only if its last failed attempt started within the window (`attempted_at >= now - window`,
+  with a redundant `scheduled_at >= now - window` bound so the query is an index range scan
+  on Oban's `(state, queue, priority, scheduled_at, id)` index). Up to v0.2.0 every
+  `retryable` job counted regardless of the window, so a worker with many jobs waiting out
+  long backoffs from failures hours ago could fire a "retry storm in the last 300s". Expect
+  fewer `:retry_storm` findings after upgrading.
+- `:orphaned` findings and docs now say what is measured: execution age only. The message
+  reads "executing for up to N s (limit L s), far beyond any expected runtime; possibly
+  orphaned by a node crash or shutdown, or genuinely still running" instead of implying the
+  node died. The check name is unchanged.
+
+### Documentation
+
+- README: "Piloting safely" (report-only rollout, what to measure, tuning, retention for
+  history-based checks); `:stalled` also fires for queues whose slots are all held by
+  long-running jobs; installation from GitHub, since the package is not yet on Hex.
+- `docs/OBAN_PRO_COMPATIBILITY.md` and an Oban Pro row under "Engine support": likely
+  compatible, unverified and untested, with the Pro features known to skew results.
+- `docs/SECURITY_REVIEW.md`: updated `:retry_storm` SQL listing.
+
 ## [0.2.0] - 2026-10-22
 
-First public release, and the first version published to Hex. 0.1.0 (below) was an
+First public release, tagged on GitHub. (An earlier version of this entry said it was
+published to Hex; it has not been published to Hex yet.) 0.1.0 (below) was an
 internal milestone: it was never tagged, released or published, and it had the
 production-safety problems listed under "Fixed" (see the findings QK-01 to QK-11 in
 `docs/SECURITY_REVIEW.md`). If you pinned a pre-release commit from GitHub, read
