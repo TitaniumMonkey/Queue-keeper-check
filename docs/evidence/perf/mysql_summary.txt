@@ -1,0 +1,11 @@
+engine=mysql version=8.4.9 rows=1000000 seeded_in=7s cpus=8
+full run: 1578.1 ms, 81 statements, status=critical, findings=26, errors=0
+per check (median of 3, warm):
+orphaned	92.0 ms
+hanging	90.4 ms
+backlog	123.0 ms
+stalled	153.3 ms
+retry_storm	170.7 ms
+discarded	130.6 ms
+cancelled	115.9 ms
+cron_missing	577.2 ms

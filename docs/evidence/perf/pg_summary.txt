@@ -1,0 +1,14 @@
+rows=10000000 size=6011 MB postgres=17.11 (Debian 17.11-0+deb13u1) shared_buffers=128MB cpus=8
+states=[["completed", 9000000], ["available", 400000], ["discarded", 300000], ["cancelled", 200000], ["scheduled", 80000], ["retryable", 19000], ["executing", 1000]]
+
+full run: 2239.1 ms, 334 statements, status=critical, findings=1331
+full run with default limits: 2226.1 ms, status=critical, errors=0
+per check (median of 3, warm):
+orphaned	8.7 ms
+hanging	9.1 ms
+backlog	47.4 ms
+stalled	1682.0 ms
+retry_storm	42.8 ms
+discarded	2.0 ms
+cancelled	1.1 ms
+cron_missing	487.2 ms

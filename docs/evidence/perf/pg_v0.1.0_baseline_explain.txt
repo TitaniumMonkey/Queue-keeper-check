@@ -1,0 +1,263 @@
+-- Q1 (371.313 ms, index only)
+SELECT count(*), pg_size_pretty(pg_total_relation_size('public.oban_jobs')) FROM public.oban_jobs
+-- params: []
+Finalize Aggregate  (cost=138396.85..138396.87 rows=1 width=40) (actual time=366.131..370.726 rows=1 loops=1)
+  Buffers: shared hit=51 read=8805
+  ->  Gather  (cost=138396.64..138396.85 rows=2 width=8) (actual time=365.739..370.464 rows=3 loops=1)
+        Workers Planned: 2
+        Workers Launched: 2
+        Buffers: shared hit=30 read=8804
+        ->  Partial Aggregate  (cost=137396.64..137396.65 rows=1 width=8) (actual time=354.765..354.766 rows=1 loops=3)
+              Buffers: shared hit=30 read=8804
+              ->  Parallel Index Only Scan using oban_jobs_state_cancelled_at_index on oban_jobs  (cost=0.43..126987.23 rows=4163763 width=0) (actual time=0.063..210.675 rows=3333333 loops=3)
+                    Heap Fetches: 0
+                    Buffers: shared hit=30 read=8804
+Planning:
+  Buffers: shared read=2
+Planning Time: 0.161 ms
+JIT:
+  Functions: 8
+  Options: Inlining false, Optimization false, Expressions true, Deforming true
+  Timing: Generation 0.634 ms (Deform 0.000 ms), Inlining 0.000 ms, Optimization 0.509 ms, Emission 5.922 ms, Total 7.066 ms
+Execution Time: 371.313 ms
+
+-- Q2 (745.263 ms, index only)
+SELECT state::text, count(*) FROM public.oban_jobs GROUP BY 1 ORDER BY 2 DESC
+-- params: []
+Sort  (cost=169626.99..169627.01 rows=7 width=40) (actual time=738.704..744.721 rows=7 loops=1)
+  Sort Key: (count(*)) DESC
+  Sort Method: quicksort  Memory: 25kB
+  Buffers: shared hit=8921 read=4
+  ->  Finalize GroupAggregate  (cost=169625.09..169626.89 rows=7 width=40) (actual time=738.685..744.706 rows=7 loops=1)
+        Group Key: ((state)::text)
+        Buffers: shared hit=8921 read=4
+        ->  Gather Merge  (cost=169625.09..169626.72 rows=14 width=40) (actual time=738.671..744.691 rows=19 loops=1)
+              Workers Planned: 2
+              Workers Launched: 2
+              Buffers: shared hit=8921 read=4
+              ->  Sort  (cost=168625.06..168625.08 rows=7 width=40) (actual time=727.108..727.110 rows=6 loops=3)
+                    Sort Key: ((state)::text)
+                    Sort Method: quicksort  Memory: 25kB
+                    Buffers: shared hit=8921 read=4
+                    Worker 0:  Sort Method: quicksort  Memory: 25kB
+                    Worker 1:  Sort Method: quicksort  Memory: 25kB
+                    ->  Partial HashAggregate  (cost=168624.86..168624.96 rows=7 width=40) (actual time=727.081..727.083 rows=6 loops=3)
+                          Group Key: (state)::text
+                          Batches: 1  Memory Usage: 24kB
+                          Buffers: shared hit=8905 read=4
+                          Worker 0:  Batches: 1  Memory Usage: 24kB
+                          Worker 1:  Batches: 1  Memory Usage: 24kB
+                          ->  Parallel Index Only Scan using oban_jobs_state_cancelled_at_index on oban_jobs  (cost=0.43..147806.04 rows=4163763 width=32) (actual time=3.027..382.936 rows=3333333 loops=3)
+                                Heap Fetches: 0
+                                Buffers: shared hit=8905 read=4
+Planning:
+  Buffers: shared hit=4
+Planning Time: 0.151 ms
+JIT:
+  Functions: 18
+  Options: Inlining false, Optimization false, Expressions true, Deforming true
+  Timing: Generation 1.028 ms (Deform 0.127 ms), Inlining 0.000 ms, Optimization 0.492 ms, Emission 8.273 ms, Total 9.793 ms
+Execution Time: 745.263 ms
+
+-- Q3 (0.359 ms, index only)
+SELECT o0."id", o0."queue", o0."worker", o0."attempted_at" FROM "public"."oban_jobs" AS o0 WHERE (o0."state" = 'executing')
+-- params: []
+Index Scan using oban_jobs_state_discarded_at_index on oban_jobs o0  (cost=0.43..2808.36 rows=999 width=42) (actual time=0.061..0.304 rows=1000 loops=1)
+  Index Cond: (state = 'executing'::oban_job_state)
+  Buffers: shared hit=39 read=2
+Planning Time: 0.085 ms
+Execution Time: 0.359 ms
+
+-- Q4 (1219.789 ms, index only)
+SELECT o0."queue", count(o0."id"), min(o0."scheduled_at")::timestamp FROM "public"."oban_jobs" AS o0 WHERE ((o0."state" = 'available') OR (o0."state" IN ('scheduled','retryable') AND (o0."scheduled_at" <= $1))) GROUP BY o0."queue"
+-- params: [~U[2026-10-22 14:12:36.724308Z]]
+Finalize GroupAggregate  (cost=459425.42..459435.76 rows=40 width=24) (actual time=1210.827..1219.182 rows=40 loops=1)
+  Group Key: queue
+  Buffers: shared hit=9109185 read=82853
+  ->  Gather Merge  (cost=459425.42..459434.76 rows=80 width=24) (actual time=1210.814..1219.153 rows=120 loops=1)
+        Workers Planned: 2
+        Workers Launched: 2
+        Buffers: shared hit=9109185 read=82853
+        ->  Sort  (cost=458425.40..458425.50 rows=40 width=24) (actual time=1199.346..1199.349 rows=40 loops=3)
+              Sort Key: queue
+              Sort Method: quicksort  Memory: 26kB
+              Buffers: shared hit=9109185 read=82853
+              Worker 0:  Sort Method: quicksort  Memory: 26kB
+              Worker 1:  Sort Method: quicksort  Memory: 26kB
+              ->  Partial HashAggregate  (cost=458423.94..458424.34 rows=40 width=24) (actual time=1199.296..1199.304 rows=40 loops=3)
+                    Group Key: queue
+                    Batches: 1  Memory Usage: 24kB
+                    Buffers: shared hit=9109169 read=82853
+                    Worker 0:  Batches: 1  Memory Usage: 24kB
+                    Worker 1:  Batches: 1  Memory Usage: 24kB
+                    ->  Parallel Index Only Scan using oban_jobs_state_queue_priority_scheduled_at_id_index on oban_jobs o0  (cost=0.56..457003.58 rows=189381 width=24) (actual time=3.222..1184.550 rows=142046 loops=3)
+                          Filter: ((state = 'available'::oban_job_state) OR ((state = ANY ('{scheduled,retryable}'::oban_job_state[])) AND (scheduled_at <= '2026-10-22 14:12:36.724308'::timestamp without time zone)))
+                          Rows Removed by Filter: 3191287
+                          Heap Fetches: 0
+                          Buffers: shared hit=9109169 read=82853
+Planning Time: 0.139 ms
+JIT:
+  Functions: 18
+  Options: Inlining false, Optimization false, Expressions true, Deforming true
+  Timing: Generation 1.200 ms (Deform 0.104 ms), Inlining 0.000 ms, Optimization 0.545 ms, Emission 9.055 ms, Total 10.800 ms
+Execution Time: 1219.789 ms
+
+-- Q5 (2212.541 ms, index only)
+SELECT o0."id" FROM "public"."oban_jobs" AS o0 WHERE ((o0."state" = 'available') OR (o0."state" IN ('scheduled','retryable') AND (o0."scheduled_at" <= $1))) AND (o0."queue" = $2) ORDER BY o0."id" LIMIT 10
+-- params: [~U[2026-10-22 14:12:36.724308Z], "queue_0"]
+Limit  (cost=0.43..590.31 rows=10 width=8) (actual time=2212.486..2212.524 rows=10 loops=1)
+  Buffers: shared hit=65 read=401530
+  ->  Index Scan using oban_jobs_pkey on oban_jobs o0  (cost=0.43..751617.24 rows=12742 width=8) (actual time=2212.484..2212.520 rows=10 loops=1)
+        Filter: ((queue = 'queue_0'::text) AND ((state = 'available'::oban_job_state) OR ((state = ANY ('{scheduled,retryable}'::oban_job_state[])) AND (scheduled_at <= '2026-10-22 14:12:36.724308'::timestamp without time zone))))
+        Rows Removed by Filter: 9500063
+        Buffers: shared hit=65 read=401530
+Planning Time: 0.141 ms
+Execution Time: 2212.541 ms
+
+-- Q6 (414.603 ms, SEQ SCAN)
+SELECT DISTINCT o0."queue" FROM "public"."oban_jobs" AS o0 WHERE ((o0."queue" = ANY($1) AND NOT (o0."attempted_at" IS NULL)) AND (o0."attempted_at" >= $2))
+-- params: [["queue_0", "queue_1", "queue_10", "queue_11", "queue_12", "queue_13", "queue_14", "queue_15", "queue_16", "queue_17", "queue_18", "queue_19", "queue_2", "queue_20", "queue_21", "queue_22", "queue_23", "queue_24", "queue_25", "queue_26", "queue_27", "queue_28", "queue_29", "queue_3", "queue_30", "queue_31", "queue_32", "queue_33", "queue_34", "queue_35", "queue_36", "queue_37", "queue_38", "queue_39", "queue_4", "queue_5", "queue_6", "queue_7", "queue_8", "queue_9"], ~U[2026-10-22 14:13:03.545301Z]]
+Unique  (cost=465979.56..465990.21 rows=40 width=8) (actual time=409.086..414.014 rows=0 loops=1)
+  Buffers: shared hit=15544 read=376634
+  ->  Gather Merge  (cost=465979.56..465990.01 rows=80 width=8) (actual time=409.085..414.012 rows=0 loops=1)
+        Workers Planned: 2
+        Workers Launched: 2
+        Buffers: shared hit=15544 read=376634
+        ->  Unique  (cost=464979.54..464980.75 rows=40 width=8) (actual time=396.909..396.911 rows=0 loops=3)
+              Buffers: shared hit=15544 read=376634
+              ->  Sort  (cost=464979.54..464980.15 rows=242 width=8) (actual time=396.908..396.909 rows=0 loops=3)
+                    Sort Key: queue
+                    Sort Method: quicksort  Memory: 25kB
+                    Buffers: shared hit=15544 read=376634
+                    Worker 0:  Sort Method: quicksort  Memory: 25kB
+                    Worker 1:  Sort Method: quicksort  Memory: 25kB
+                    ->  Parallel Seq Scan on oban_jobs o0  (cost=0.10..464969.96 rows=242 width=8) (actual time=396.848..396.849 rows=0 loops=3)
+                          Filter: ((attempted_at IS NOT NULL) AND (attempted_at >= '2026-10-22 14:13:03.545301'::timestamp without time zone) AND (queue = ANY ('{queue_0,queue_1,queue_10,queue_11,queue_12,queue_13,queue_14,queue_15,queue_16,queue_17,queue_18,queue_19,queue_2,queue_20,queue_21,queue_22,queue_23,queue_24,queue_25,queue_26,queue_27,queue_28,queue_29,queue_3,queue_30,queue_31,queue_32,queue_33,queue_34,queue_35,queue_36,queue_37,queue_38,queue_39,queue_4,queue_5,queue_6,queue_7,queue_8,queue_9}'::text[])))
+                          Rows Removed by Filter: 3333333
+                          Buffers: shared hit=15476 read=376628
+Planning Time: 0.208 ms
+JIT:
+  Functions: 16
+  Options: Inlining false, Optimization false, Expressions true, Deforming true
+  Timing: Generation 1.351 ms (Deform 0.570 ms), Inlining 0.000 ms, Optimization 0.678 ms, Emission 10.639 ms, Total 12.668 ms
+Execution Time: 414.603 ms
+
+-- Q7 (414.729 ms, SEQ SCAN)
+SELECT o0."worker", o0."queue", count(o0."id") FROM "public"."oban_jobs" AS o0 WHERE ((o0."state" = 'retryable') OR ((o0."attempt" >= 2) AND (o0."attempted_at" >= $1))) GROUP BY o0."worker", o0."queue"
+-- params: [~U[2026-10-22 14:10:31.517612Z]]
+Finalize GroupAggregate  (cost=466365.83..468112.43 rows=7786 width=34) (actual time=408.245..413.991 rows=1000 loops=1)
+  Group Key: worker, queue
+  Buffers: shared hit=15646 read=376532
+  ->  Gather Merge  (cost=466365.83..467940.41 rows=12554 width=34) (actual time=408.233..413.627 rows=3000 loops=1)
+        Workers Planned: 2
+        Workers Launched: 2
+        Buffers: shared hit=15646 read=376532
+        ->  Partial GroupAggregate  (cost=465365.81..465491.35 rows=6277 width=34) (actual time=394.447..395.333 rows=1000 loops=3)
+              Group Key: worker, queue
+              Buffers: shared hit=15646 read=376532
+              ->  Sort  (cost=465365.81..465381.50 rows=6277 width=34) (actual time=394.415..394.638 rows=6333 loops=3)
+                    Sort Key: worker, queue
+                    Sort Method: quicksort  Memory: 570kB
+                    Buffers: shared hit=15646 read=376532
+                    Worker 0:  Sort Method: quicksort  Memory: 523kB
+                    Worker 1:  Sort Method: quicksort  Memory: 525kB
+                    ->  Parallel Seq Scan on oban_jobs o0  (cost=0.00..464969.86 rows=6277 width=34) (actual time=388.674..390.828 rows=6333 loops=3)
+                          Filter: ((state = 'retryable'::oban_job_state) OR ((attempt >= 2) AND (attempted_at >= '2026-10-22 14:10:31.517612'::timestamp without time zone)))
+                          Rows Removed by Filter: 3327000
+                          Buffers: shared hit=15572 read=376532
+Planning:
+  Buffers: shared hit=3
+Planning Time: 0.161 ms
+JIT:
+  Functions: 30
+  Options: Inlining false, Optimization false, Expressions true, Deforming true
+  Timing: Generation 2.174 ms (Deform 0.797 ms), Inlining 0.000 ms, Optimization 0.997 ms, Emission 15.823 ms, Total 18.994 ms
+Execution Time: 414.729 ms
+
+-- Q8 (840.271 ms, index only)
+SELECT o0."id" FROM "public"."oban_jobs" AS o0 WHERE ((o0."state" = 'retryable') OR ((o0."attempt" >= 2) AND (o0."attempted_at" >= $1))) AND (o0."worker" = $2) ORDER BY o0."id" LIMIT 10
+-- params: [~U[2026-10-22 14:10:31.517612Z], "MyApp.Workers.W72"]
+Limit  (cost=1000.46..106840.18 rows=10 width=8) (actual time=831.171..839.831 rows=10 loops=1)
+  Buffers: shared hit=25920 read=418843
+  ->  Gather Merge  (cost=1000.46..636038.81 rows=60 width=8) (actual time=828.726..837.384 rows=10 loops=1)
+        Workers Planned: 2
+        Workers Launched: 2
+        Buffers: shared hit=25920 read=418843
+        ->  Parallel Index Scan using oban_jobs_pkey on oban_jobs o0  (cost=0.43..635031.86 rows=25 width=8) (actual time=816.199..816.648 rows=7 loops=3)
+              Filter: ((worker = 'MyApp.Workers.W72'::text) AND ((state = 'retryable'::oban_job_state) OR ((attempt >= 2) AND (attempted_at >= '2026-10-22 14:10:31.517612'::timestamp without time zone))))
+              Rows Removed by Filter: 3328418
+              Buffers: shared hit=25920 read=418843
+Planning Time: 0.121 ms
+JIT:
+  Functions: 13
+  Options: Inlining false, Optimization false, Expressions true, Deforming true
+  Timing: Generation 1.087 ms (Deform 0.434 ms), Inlining 0.000 ms, Optimization 0.626 ms, Emission 8.568 ms, Total 10.280 ms
+Execution Time: 840.271 ms
+
+-- Q9 (0.945 ms, index only)
+SELECT o0."worker", o0."queue", count(o0."id") FROM "public"."oban_jobs" AS o0 WHERE ((o0."state" = $1) AND (o0."discarded_at" >= $2)) GROUP BY o0."worker", o0."queue"
+-- params: ["discarded", ~U[2026-10-22 13:24:40.993819Z]]
+GroupAggregate  (cost=19.71..19.81 rows=5 width=34) (actual time=0.858..0.917 rows=164 loops=1)
+  Group Key: worker, queue
+  Buffers: shared read=222
+  ->  Sort  (cost=19.71..19.72 rows=5 width=34) (actual time=0.848..0.858 rows=218 loops=1)
+        Sort Key: worker, queue
+        Sort Method: quicksort  Memory: 36kB
+        Buffers: shared read=222
+        ->  Index Scan using oban_jobs_state_discarded_at_index on oban_jobs o0  (cost=0.43..19.65 rows=5 width=34) (actual time=0.038..0.741 rows=218 loops=1)
+              Index Cond: ((state = 'discarded'::oban_job_state) AND (discarded_at >= '2026-10-22 13:24:40.993819'::timestamp without time zone))
+              Buffers: shared read=222
+Planning:
+  Buffers: shared read=6
+Planning Time: 0.164 ms
+Execution Time: 0.945 ms
+
+-- Q10 (0.607 ms, index only)
+SELECT o0."worker", o0."queue", count(o0."id") FROM "public"."oban_jobs" AS o0 WHERE ((o0."state" = $1) AND (o0."cancelled_at" >= $2)) GROUP BY o0."worker", o0."queue"
+-- params: ["cancelled", ~U[2026-10-22 13:24:40.997853Z]]
+GroupAggregate  (cost=14.08..14.14 rows=3 width=34) (actual time=0.530..0.579 rows=125 loops=1)
+  Group Key: worker, queue
+  Buffers: shared hit=18 read=130
+  ->  Sort  (cost=14.08..14.08 rows=3 width=34) (actual time=0.524..0.531 rows=144 loops=1)
+        Sort Key: worker, queue
+        Sort Method: quicksort  Memory: 32kB
+        Buffers: shared hit=18 read=130
+        ->  Index Scan using oban_jobs_state_cancelled_at_index on oban_jobs o0  (cost=0.43..14.05 rows=3 width=34) (actual time=0.025..0.445 rows=144 loops=1)
+              Index Cond: ((state = 'cancelled'::oban_job_state) AND (cancelled_at >= '2026-10-22 13:24:40.997853'::timestamp without time zone))
+              Buffers: shared hit=18 read=130
+Planning:
+  Buffers: shared hit=6
+Planning Time: 0.137 ms
+Execution Time: 0.607 ms
+
+-- Q11 (487.726 ms, SEQ SCAN)
+SELECT o0."worker", max(o0."inserted_at")::timestamp, max(o0."id") FROM "public"."oban_jobs" AS o0 WHERE (o0."worker" = ANY($1)) GROUP BY o0."worker"
+-- params: [["MyApp.Workers.Never", "MyApp.Workers.W7"]]
+Finalize GroupAggregate  (cost=447638.85..448036.66 rows=250 width=34) (actual time=481.228..487.004 rows=1 loops=1)
+  Group Key: worker
+  Buffers: shared hit=15129 read=377049
+  ->  Gather Merge  (cost=447638.85..448030.41 rows=500 width=34) (actual time=481.219..486.994 rows=3 loops=1)
+        Workers Planned: 2
+        Workers Launched: 2
+        Buffers: shared hit=15129 read=377049
+        ->  Partial GroupAggregate  (cost=446638.83..446972.68 rows=250 width=34) (actual time=469.319..469.320 rows=1 loops=3)
+              Group Key: worker
+              Buffers: shared hit=15129 read=377049
+              ->  Sort  (cost=446638.83..446721.67 rows=33135 width=34) (actual time=467.683..468.228 rows=13333 loops=3)
+                    Sort Key: worker
+                    Sort Method: quicksort  Memory: 1121kB
+                    Buffers: shared hit=15129 read=377049
+                    Worker 0:  Sort Method: quicksort  Memory: 1099kB
+                    Worker 1:  Sort Method: quicksort  Memory: 1120kB
+                    ->  Parallel Seq Scan on oban_jobs o0  (cost=0.00..444151.04 rows=33135 width=34) (actual time=4.819..463.946 rows=13333 loops=3)
+                          Filter: (worker = ANY ('{MyApp.Workers.Never,MyApp.Workers.W7}'::text[]))
+                          Rows Removed by Filter: 3320000
+                          Buffers: shared hit=15066 read=377038
+Planning:
+  Buffers: shared hit=5 read=4
+Planning Time: 0.112 ms
+JIT:
+  Functions: 30
+  Options: Inlining false, Optimization false, Expressions true, Deforming true
+  Timing: Generation 1.531 ms (Deform 0.588 ms), Inlining 0.000 ms, Optimization 0.809 ms, Emission 13.566 ms, Total 15.906 ms
+Execution Time: 487.726 ms

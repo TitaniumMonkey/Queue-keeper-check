@@ -1,0 +1,29 @@
+# dev/verify_host_app.sh against this checkout, 2026-10-22 09:38 -05
+== mix queue_keeper.check (QK_PATH=../..)
+   | WARNING: 1 Oban queue problem(s) at 2026-10-22T14:38:13.221679Z
+   | - [warning] discarded queue=default worker=HostApp.Worker: 6 HostApp.Worker job(s) exhausted their attempts or were discarded in the last 3600s (limit 5). These fail silently unless something alerts on them. sample_ids=[14, 15, 16, 17, 18, 19]
+exit code: 1
+db before: 6 jobs, 0 peers, max(id)=19
+db after:  6 jobs, 0 peers, max(id)=19
+RESULT: host application not started
+RESULT: no rows written
+== release: bin/host_app eval 'QueueKeeperCheck.Release.main(...)'
+   | WARNING: 1 Oban queue problem(s) at 2026-10-22T14:38:16.557765Z
+   | - [warning] discarded queue=default worker=HostApp.Worker: 6 HostApp.Worker job(s) exhausted their attempts or were discarded in the last 3600s (limit 5). These fail silently unless something alerts on them. sample_ids=[14, 15, 16, 17, 18, 19]
+exit code: 1
+db before: 6 jobs, 0 peers, max(id)=19
+db after:  6 jobs, 0 peers, max(id)=19
+RESULT: host application not started
+RESULT: no rows written
+== release: what is running after Release.check/2
+   | exit code 1; started applications: [:asn1, :compiler, :crypto, :db_connection, :decimal, :ecto, :ecto_sql, :eex, :elixir, :jason, :kernel, :logger, :postgrex, :public_key, :ssl, :stdlib, :telemetry]
+   | host_app started? false; oban started? false
+   | Oban.Registry process: nil
+   | repo still running after check? nil
+== release under strace: network connects and files opened for writing
+connect() targets (excluding AF_UNIX sockets of the local epmd-less runtime):
+         2 {sa_family=AF_INET, sin_port=htons(5432), sin_addr=inet_addr("127.0.0.1")}
+AF_UNIX connects:
+         4 {sa_family=AF_UNIX, sun_path="/var/run/nscd/socket"}
+files opened with O_WRONLY/O_RDWR/O_CREAT:
+         2 "/dev/null"

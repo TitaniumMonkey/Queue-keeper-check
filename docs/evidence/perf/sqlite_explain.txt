@@ -1,0 +1,100 @@
+-- Q1
+SELECT o0."queue", o0."worker", count(o0."id"), CAST(min(o0."attempted_at") AS TEXT) FROM "oban_jobs" AS o0 WHERE ((o0."state" = 'executing') AND (o0."attempted_at" <= ?)) GROUP BY o0."queue", o0."worker" ORDER BY o0."queue", o0."worker"
+-- params: [~U[2026-10-22 13:37:44.425071Z]]
+8 0 195 SEARCH o0 USING INDEX oban_jobs_state_queue_priority_scheduled_at_id_index (state=?)
+15 0 0 USE TEMP B-TREE FOR GROUP BY
+
+-- Q2
+SELECT o0."id" FROM "oban_jobs" AS o0 WHERE ((o0."state" = 'executing') AND (o0."attempted_at" <= ?)) AND ((o0."queue" = ?) AND (o0."worker" = ?)) LIMIT 10
+-- params: [~U[2026-10-22 13:37:44.425071Z], "queue_0", "MyApp.Workers.W170"]
+4 0 144 SEARCH o0 USING INDEX oban_jobs_state_queue_priority_scheduled_at_id_index (state=? AND queue=?)
+
+-- Q3
+SELECT o0."queue", o0."worker", count(o0."id"), CAST(min(o0."attempted_at") AS TEXT) FROM "oban_jobs" AS o0 WHERE (((o0."state" = 'executing') AND (o0."attempted_at" > ?)) AND (o0."attempted_at" <= ?)) GROUP BY o0."queue", o0."worker" ORDER BY o0."queue", o0."worker"
+-- params: [~U[2026-10-22 13:37:44.425071Z], ~U[2026-10-22 14:32:43.425071Z]]
+8 0 195 SEARCH o0 USING INDEX oban_jobs_state_queue_priority_scheduled_at_id_index (state=?)
+17 0 0 USE TEMP B-TREE FOR GROUP BY
+
+-- Q4
+SELECT o0."queue", count(o0."id"), CAST(min(o0."scheduled_at") AS TEXT) FROM "oban_jobs" AS o0 WHERE ((o0."state" IN (SELECT value FROM JSON_EACH('["available","scheduled","retryable"]'))) AND ((o0."state" = 'available') OR (o0."scheduled_at" <= ?))) GROUP BY o0."queue" ORDER BY o0."queue"
+-- params: [~U[2026-10-22 14:37:44.425071Z]]
+7 0 212 SEARCH o0 USING COVERING INDEX oban_jobs_state_queue_priority_scheduled_at_id_index (state=?)
+11 0 0 LIST SUBQUERY 1
+13 11 0 SCAN JSON_EACH VIRTUAL TABLE INDEX 1:
+33 0 0 USE TEMP B-TREE FOR GROUP BY
+
+-- Q5
+SELECT o0."id" FROM "oban_jobs" AS o0 WHERE ((o0."state" IN (SELECT value FROM JSON_EACH('["available","scheduled","retryable"]'))) AND ((o0."state" = 'available') OR (o0."scheduled_at" <= ?))) AND (o0."queue" = ?) LIMIT 10
+-- params: [~U[2026-10-22 14:37:44.425071Z], "queue_0"]
+3 0 178 SEARCH o0 USING COVERING INDEX oban_jobs_state_queue_priority_scheduled_at_id_index (state=? AND queue=?)
+7 0 0 LIST SUBQUERY 1
+9 7 0 SCAN JSON_EACH VIRTUAL TABLE INDEX 1:
+
+-- Q6
+SELECT o0."id" FROM "oban_jobs" AS o0 WHERE ((o0."state" = 'executing') AND (o0."attempted_at" >= ?)) AND (o0."queue" = ?) LIMIT 1
+-- params: [~U[2026-10-22 14:36:44.425071Z], "queue_0"]
+4 0 144 SEARCH o0 USING INDEX oban_jobs_state_queue_priority_scheduled_at_id_index (state=? AND queue=?)
+
+-- Q7
+SELECT o0."id" FROM "oban_jobs" AS o0 WHERE (((o0."state" IN (SELECT value FROM JSON_EACH('["scheduled","retryable"]'))) AND (o0."scheduled_at" >= ?)) AND (o0."attempted_at" >= ?)) AND (o0."queue" = ?) LIMIT 1
+-- params: [~U[2026-10-22 14:36:44.425071Z], ~U[2026-10-22 14:36:44.425071Z], "queue_0"]
+4 0 190 SEARCH o0 USING INDEX oban_jobs_state_queue_priority_scheduled_at_id_index (state=? AND queue=?)
+8 0 0 LIST SUBQUERY 1
+10 8 0 SCAN JSON_EACH VIRTUAL TABLE INDEX 1:
+
+-- Q8
+SELECT o0."id" FROM "oban_jobs" AS o0 WHERE ((o0."state" = 'discarded') AND (o0."discarded_at" >= ?)) AND (o0."queue" = ?) LIMIT 1
+-- params: [~U[2026-10-22 14:36:44.425071Z], "queue_0"]
+4 0 144 SEARCH o0 USING INDEX oban_jobs_state_queue_priority_scheduled_at_id_index (state=? AND queue=?)
+
+-- Q9
+SELECT o0."id" FROM "oban_jobs" AS o0 WHERE ((o0."state" = 'cancelled') AND (o0."cancelled_at" >= ?)) AND (o0."queue" = ?) LIMIT 1
+-- params: [~U[2026-10-22 14:36:44.425071Z], "queue_0"]
+4 0 144 SEARCH o0 USING INDEX oban_jobs_state_queue_priority_scheduled_at_id_index (state=? AND queue=?)
+
+-- Q10
+SELECT o0."id" FROM "oban_jobs" AS o0 WHERE (((o0."state" = 'completed') AND (o0."scheduled_at" >= ?)) AND (o0."attempted_at" >= ?)) AND (o0."queue" = ?) LIMIT 1
+-- params: [~U[2026-10-22 11:37:51.425071Z], ~U[2026-10-22 14:36:44.425071Z], "queue_0"]
+4 0 144 SEARCH o0 USING INDEX oban_jobs_state_queue_priority_scheduled_at_id_index (state=? AND queue=?)
+
+-- Q11
+SELECT o0."worker", o0."queue", count(o0."id") FROM "oban_jobs" AS o0 WHERE (o0."state" = 'retryable') GROUP BY o0."worker", o0."queue"
+-- params: []
+7 0 195 SEARCH o0 USING INDEX oban_jobs_state_queue_priority_scheduled_at_id_index (state=?)
+12 0 0 USE TEMP B-TREE FOR GROUP BY
+
+-- Q12
+SELECT o0."worker", o0."queue", count(o0."id") FROM "oban_jobs" AS o0 WHERE (((o0."state" = 'executing') AND (o0."attempt" >= 2)) AND (o0."attempted_at" >= ?)) GROUP BY o0."worker", o0."queue"
+-- params: [~U[2026-10-22 14:32:44.425071Z]]
+7 0 195 SEARCH o0 USING INDEX oban_jobs_state_queue_priority_scheduled_at_id_index (state=?)
+16 0 0 USE TEMP B-TREE FOR GROUP BY
+
+-- Q13
+SELECT o0."worker", o0."queue", count(o0."id") FROM "oban_jobs" AS o0 WHERE (((o0."state" = 'discarded') AND (o0."discarded_at" >= ?)) AND (o0."attempt" >= 2)) GROUP BY o0."worker", o0."queue"
+-- params: [~U[2026-10-22 14:32:44.425071Z]]
+7 0 195 SEARCH o0 USING INDEX oban_jobs_state_queue_priority_scheduled_at_id_index (state=?)
+16 0 0 USE TEMP B-TREE FOR GROUP BY
+
+-- Q14
+SELECT o0."worker", o0."queue", count(o0."id") FROM "oban_jobs" AS o0 WHERE (((o0."state" = 'cancelled') AND (o0."cancelled_at" >= ?)) AND (o0."attempt" >= 2)) GROUP BY o0."worker", o0."queue"
+-- params: [~U[2026-10-22 14:32:44.425071Z]]
+7 0 195 SEARCH o0 USING INDEX oban_jobs_state_queue_priority_scheduled_at_id_index (state=?)
+16 0 0 USE TEMP B-TREE FOR GROUP BY
+
+-- Q15
+SELECT o0."worker", o0."queue", count(o0."id") FROM "oban_jobs" AS o0 WHERE ((o0."state" = ?) AND (o0."discarded_at" >= ?)) GROUP BY o0."worker", o0."queue"
+-- params: ["discarded", ~U[2026-10-22 13:37:44.425071Z]]
+7 0 195 SEARCH o0 USING INDEX oban_jobs_state_queue_priority_scheduled_at_id_index (state=?)
+16 0 0 USE TEMP B-TREE FOR GROUP BY
+
+-- Q16
+SELECT o0."worker", o0."queue", count(o0."id") FROM "oban_jobs" AS o0 WHERE ((o0."state" = ?) AND (o0."cancelled_at" >= ?)) GROUP BY o0."worker", o0."queue"
+-- params: ["cancelled", ~U[2026-10-22 13:37:44.425071Z]]
+7 0 195 SEARCH o0 USING INDEX oban_jobs_state_queue_priority_scheduled_at_id_index (state=?)
+16 0 0 USE TEMP B-TREE FOR GROUP BY
+
+-- Q17 (FULL SCAN)
+SELECT o0."worker", CAST(max(o0."inserted_at") AS TEXT), max(o0."id") FROM "oban_jobs" AS o0 WHERE (o0."worker" IN (?,?)) GROUP BY o0."worker"
+-- params: ["MyApp.Workers.Never", "MyApp.Workers.W7"]
+6 0 215 SCAN o0
+11 0 0 USE TEMP B-TREE FOR GROUP BY

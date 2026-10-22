@@ -1,0 +1,147 @@
+-- Q1
+SELECT o0.`queue`, o0.`worker`, count(o0.`id`), CAST(min(o0.`attempted_at`) AS datetime(6)) FROM `oban_jobs` AS o0 WHERE ((o0.`state` = 'executing') AND (o0.`attempted_at` <= ?)) GROUP BY o0.`queue`, o0.`worker` ORDER BY o0.`queue`, o0.`worker`
+-- params: [~U[2026-10-22 13:37:33.810867Z]]
+-> Sort: o0.queue, o0.worker  (actual time=0.281..0.282 rows=10 loops=1)
+    -> Table scan on <temporary>  (actual time=0.239..0.241 rows=10 loops=1)
+        -> Aggregate using temporary table  (actual time=0.235..0.235 rows=10 loops=1)
+            -> Filter: (o0.attempted_at <= TIMESTAMP'2026-10-22 13:37:33.810867')  (cost=60.4 rows=33.3) (actual time=0.0534..0.207 rows=10 loops=1)
+                -> Index lookup on o0 using oban_jobs_state_queue_priority_scheduled_at_id_index (state='executing'), with index condition: (o0.state = 'executing')  (cost=60.4 rows=100) (actual time=0.0492..0.19 rows=100 loops=1)
+
+
+-- Q2
+SELECT o0.`id` FROM `oban_jobs` AS o0 WHERE ((o0.`state` = 'executing') AND (o0.`attempted_at` <= ?)) AND ((o0.`queue` = ?) AND (o0.`worker` = ?)) LIMIT 10
+-- params: [~U[2026-10-22 13:37:33.810867Z], "queue_0", "MyApp.Workers.W170"]
+-> Limit: 10 row(s)  (cost=1.15 rows=0.0667) (actual time=0.0275..0.0294 rows=1 loops=1)
+    -> Filter: ((o0.worker = 'MyApp.Workers.W170') and (o0.attempted_at <= TIMESTAMP'2026-10-22 13:37:33.810867'))  (cost=1.15 rows=0.0667) (actual time=0.0224..0.0242 rows=1 loops=1)
+        -> Index lookup on o0 using oban_jobs_state_queue_priority_scheduled_at_id_index (state='executing', queue='queue_0'), with index condition: (o0.state = 'executing')  (cost=1.15 rows=2) (actual time=0.0205..0.0216 rows=2 loops=1)
+
+
+-- Q3
+SELECT o0.`queue`, o0.`worker`, count(o0.`id`), CAST(min(o0.`attempted_at`) AS datetime(6)) FROM `oban_jobs` AS o0 WHERE (((o0.`state` = 'executing') AND (o0.`attempted_at` > ?)) AND (o0.`attempted_at` <= ?)) GROUP BY o0.`queue`, o0.`worker` ORDER BY o0.`queue`, o0.`worker`
+-- params: [~U[2026-10-22 13:37:33.810867Z], ~U[2026-10-22 14:32:32.810867Z]]
+-> Sort: o0.queue, o0.worker  (actual time=0.155..0.155 rows=0 loops=1)
+    -> Table scan on <temporary>  (actual time=0.15..0.15 rows=0 loops=1)
+        -> Aggregate using temporary table  (actual time=0.149..0.149 rows=0 loops=1)
+            -> Filter: ((o0.attempted_at > TIMESTAMP'2026-10-22 13:37:33.810867') and (o0.attempted_at <= TIMESTAMP'2026-10-22 14:32:32.810867'))  (cost=58.2 rows=11.1) (actual time=0.143..0.143 rows=0 loops=1)
+                -> Index lookup on o0 using oban_jobs_state_queue_priority_scheduled_at_id_index (state='executing'), with index condition: (o0.state = 'executing')  (cost=58.2 rows=100) (actual time=0.0287..0.132 rows=100 loops=1)
+
+
+-- Q4
+SELECT o0.`queue`, count(o0.`id`), CAST(min(o0.`scheduled_at`) AS datetime(6)) FROM `oban_jobs` AS o0 WHERE (o0.`state` IN ('available','scheduled','retryable') AND ((o0.`state` = 'available') OR (o0.`scheduled_at` <= ?))) GROUP BY o0.`queue` ORDER BY o0.`queue`
+-- params: [~U[2026-10-22 14:37:33.810867Z]]
+-> Sort: o0.queue  (actual time=34.3..34.3 rows=22 loops=1)
+    -> Table scan on <temporary>  (actual time=34.2..34.2 rows=22 loops=1)
+        -> Aggregate using temporary table  (actual time=34.2..34.2 rows=22 loops=1)
+            -> Filter: ((o0.state in ('available','scheduled','retryable')) and ((o0.state = 'available') or (o0.scheduled_at <= TIMESTAMP'2026-10-22 14:37:33.810867')))  (cost=24114 rows=99368) (actual time=0.0316..24 rows=40821 loops=1)
+                -> Covering index range scan on o0 using oban_jobs_state_queue_priority_scheduled_at_id_index over (state = 'available') OR (state = 'scheduled') OR (state = 'retryable')  (cost=24114 rows=99368) (actual time=0.0254..12.6 rows=49900 loops=1)
+
+
+-- Q5
+SELECT o0.`id` FROM `oban_jobs` AS o0 WHERE (o0.`state` IN ('available','scheduled','retryable') AND ((o0.`state` = 'available') OR (o0.`scheduled_at` <= ?))) AND (o0.`queue` = ?) LIMIT 10
+-- params: [~U[2026-10-22 14:37:33.810867Z], "queue_0"]
+-> Limit: 10 row(s)  (cost=2301 rows=10) (actual time=0.0384..0.0433 rows=10 loops=1)
+    -> Filter: ((o0.queue = 'queue_0') and (o0.state in ('available','scheduled','retryable')) and ((o0.state = 'available') or (o0.scheduled_at <= TIMESTAMP'2026-10-22 14:37:33.810867')))  (cost=2301 rows=9482) (actual time=0.0379..0.0422 rows=10 loops=1)
+        -> Covering index range scan on o0 using oban_jobs_state_queue_priority_scheduled_at_id_index over (state = 'available' AND queue = 'queue_0') OR (state = 'scheduled' AND queue = 'queue_0') OR (state = 'retryable' AND queue = 'queue_0')  (cost=2301 rows=9482) (actual time=0.036..0.038 rows=10 loops=1)
+
+
+-- Q6
+SELECT o0.`id` FROM `oban_jobs` AS o0 WHERE ((o0.`state` = 'executing') AND (o0.`attempted_at` >= ?)) AND (o0.`queue` = ?) LIMIT 1
+-- params: [~U[2026-10-22 14:36:33.810867Z], "queue_0"]
+-> Limit: 1 row(s)  (cost=1.21 rows=0.667) (actual time=0.0221..0.0221 rows=0 loops=1)
+    -> Filter: (o0.attempted_at >= TIMESTAMP'2026-10-22 14:36:33.810867')  (cost=1.21 rows=0.667) (actual time=0.0215..0.0215 rows=0 loops=1)
+        -> Index lookup on o0 using oban_jobs_state_queue_priority_scheduled_at_id_index (state='executing', queue='queue_0'), with index condition: (o0.state = 'executing')  (cost=1.21 rows=2) (actual time=0.0185..0.0195 rows=2 loops=1)
+
+
+-- Q7
+SELECT o0.`id` FROM `oban_jobs` AS o0 WHERE ((o0.`state` IN ('scheduled','retryable') AND (o0.`scheduled_at` >= ?)) AND (o0.`attempted_at` >= ?)) AND (o0.`queue` = ?) LIMIT 1
+-- params: [~U[2026-10-22 14:36:33.810867Z], ~U[2026-10-22 14:36:33.810867Z], "queue_0"]
+-> Limit: 1 row(s)  (cost=192 rows=1) (actual time=0.466..0.466 rows=0 loops=1)
+    -> Filter: (o0.attempted_at >= TIMESTAMP'2026-10-22 14:36:33.810867')  (cost=192 rows=27.6) (actual time=0.465..0.465 rows=0 loops=1)
+        -> Index range scan on o0 using oban_jobs_state_queue_priority_scheduled_at_id_index over (state = 'scheduled' AND queue = 'queue_0') OR (state = 'retryable' AND queue = 'queue_0'), with index condition: ((o0.queue = 'queue_0') and (o0.state in ('scheduled','retryable')) and (o0.scheduled_at >= TIMESTAMP'2026-10-22 14:36:33.810867'))  (cost=192 rows=248) (actual time=0.0966..0.457 rows=192 loops=1)
+
+
+-- Q8
+SELECT o0.`id` FROM `oban_jobs` AS o0 WHERE ((o0.`state` = 'discarded') AND (o0.`discarded_at` >= ?)) AND (o0.`queue` = ?) LIMIT 1
+-- params: [~U[2026-10-22 14:36:33.810867Z], "queue_0"]
+-> Limit: 1 row(s)  (cost=453 rows=1) (actual time=1.84..1.84 rows=0 loops=1)
+    -> Filter: (o0.discarded_at >= TIMESTAMP'2026-10-22 14:36:33.810867')  (cost=453 rows=250) (actual time=1.84..1.84 rows=0 loops=1)
+        -> Index lookup on o0 using oban_jobs_state_queue_priority_scheduled_at_id_index (state='discarded', queue='queue_0'), with index condition: (o0.state = 'discarded')  (cost=453 rows=750) (actual time=0.191..1.8 rows=750 loops=1)
+
+
+-- Q9
+SELECT o0.`id` FROM `oban_jobs` AS o0 WHERE ((o0.`state` = 'cancelled') AND (o0.`cancelled_at` >= ?)) AND (o0.`queue` = ?) LIMIT 1
+-- params: [~U[2026-10-22 14:36:33.810867Z], "queue_0"]
+-> Limit: 1 row(s)  (cost=302 rows=1) (actual time=1.03..1.03 rows=0 loops=1)
+    -> Filter: (o0.cancelled_at >= TIMESTAMP'2026-10-22 14:36:33.810867')  (cost=302 rows=167) (actual time=1.03..1.03 rows=0 loops=1)
+        -> Index lookup on o0 using oban_jobs_state_queue_priority_scheduled_at_id_index (state='cancelled', queue='queue_0'), with index condition: (o0.state = 'cancelled')  (cost=302 rows=500) (actual time=0.153..1 rows=500 loops=1)
+
+
+-- Q10
+SELECT o0.`id` FROM `oban_jobs` AS o0 WHERE (((o0.`state` = 'completed') AND (o0.`scheduled_at` >= ?)) AND (o0.`attempted_at` >= ?)) AND (o0.`queue` = ?) LIMIT 1
+-- params: [~U[2026-10-22 11:37:35.810867Z], ~U[2026-10-22 14:36:33.810867Z], "queue_0"]
+-> Limit: 1 row(s)  (cost=18386 rows=1) (actual time=9.76..9.76 rows=1 loops=1)
+    -> Filter: (o0.attempted_at >= TIMESTAMP'2026-10-22 14:36:33.810867')  (cost=18386 rows=4506) (actual time=9.76..9.76 rows=1 loops=1)
+        -> Index lookup on o0 using oban_jobs_state_queue_priority_scheduled_at_id_index (state='completed', queue='queue_0'), with index condition: ((o0.state = 'completed') and (o0.scheduled_at >= TIMESTAMP'2026-10-22 11:37:35.810867'))  (cost=18386 rows=40560) (actual time=8.36..9.76 rows=94 loops=1)
+
+
+-- Q11
+SELECT o0.`worker`, o0.`queue`, count(o0.`id`) FROM `oban_jobs` AS o0 WHERE (o0.`state` = 'retryable') GROUP BY o0.`worker`, o0.`queue`
+-- params: []
+-> Table scan on <temporary>  (actual time=2.91..3 rows=1000 loops=1)
+    -> Aggregate using temporary table  (actual time=2.91..2.91 rows=1000 loops=1)
+        -> Index lookup on o0 using oban_jobs_state_queue_priority_scheduled_at_id_index (state='retryable'), with index condition: (o0.state = 'retryable')  (cost=1275 rows=1900) (actual time=0.115..2.27 rows=1900 loops=1)
+
+
+-- Q12
+SELECT o0.`worker`, o0.`queue`, count(o0.`id`) FROM `oban_jobs` AS o0 WHERE (((o0.`state` = 'executing') AND (o0.`attempt` >= 2)) AND (o0.`attempted_at` >= ?)) GROUP BY o0.`worker`, o0.`queue`
+-- params: [~U[2026-10-22 14:32:33.810867Z]]
+-> Table scan on <temporary>  (actual time=0.155..0.155 rows=0 loops=1)
+    -> Aggregate using temporary table  (actual time=0.154..0.154 rows=0 loops=1)
+        -> Filter: ((o0.attempt >= 2) and (o0.attempted_at >= TIMESTAMP'2026-10-22 14:32:33.810867'))  (cost=58.2 rows=11.1) (actual time=0.149..0.149 rows=0 loops=1)
+            -> Index lookup on o0 using oban_jobs_state_queue_priority_scheduled_at_id_index (state='executing'), with index condition: (o0.state = 'executing')  (cost=58.2 rows=100) (actual time=0.0261..0.135 rows=100 loops=1)
+
+
+-- Q13
+SELECT o0.`worker`, o0.`queue`, count(o0.`id`) FROM `oban_jobs` AS o0 WHERE (((o0.`state` = 'discarded') AND (o0.`discarded_at` >= ?)) AND (o0.`attempt` >= 2)) GROUP BY o0.`worker`, o0.`queue`
+-- params: [~U[2026-10-22 14:32:33.810867Z]]
+-> Table scan on <temporary>  (actual time=42.4..42.4 rows=4 loops=1)
+    -> Aggregate using temporary table  (actual time=42.4..42.4 rows=4 loops=1)
+        -> Filter: ((o0.discarded_at >= TIMESTAMP'2026-10-22 14:32:33.810867') and (o0.attempt >= 2))  (cost=18605 rows=6582) (actual time=2.96..42.4 rows=4 loops=1)
+            -> Index lookup on o0 using oban_jobs_state_queue_priority_scheduled_at_id_index (state='discarded'), with index condition: (o0.state = 'discarded')  (cost=18605 rows=59254) (actual time=0.172..41 rows=30000 loops=1)
+
+
+-- Q14
+SELECT o0.`worker`, o0.`queue`, count(o0.`id`) FROM `oban_jobs` AS o0 WHERE (((o0.`state` = 'cancelled') AND (o0.`cancelled_at` >= ?)) AND (o0.`attempt` >= 2)) GROUP BY o0.`worker`, o0.`queue`
+-- params: [~U[2026-10-22 14:32:33.810867Z]]
+-> Table scan on <temporary>  (actual time=28..28 rows=0 loops=1)
+    -> Aggregate using temporary table  (actual time=28..28 rows=0 loops=1)
+        -> Filter: ((o0.cancelled_at >= TIMESTAMP'2026-10-22 14:32:33.810867') and (o0.attempt >= 2))  (cost=18458 rows=5110) (actual time=28..28 rows=0 loops=1)
+            -> Index lookup on o0 using oban_jobs_state_queue_priority_scheduled_at_id_index (state='cancelled'), with index condition: (o0.state = 'cancelled')  (cost=18458 rows=46002) (actual time=0.165..27.1 rows=20000 loops=1)
+
+
+-- Q15
+SELECT o0.`worker`, o0.`queue`, count(o0.`id`) FROM `oban_jobs` AS o0 WHERE ((o0.`state` = ?) AND (o0.`discarded_at` >= ?)) GROUP BY o0.`worker`, o0.`queue`
+-- params: ["discarded", ~U[2026-10-22 13:37:33.810867Z]]
+-> Table scan on <temporary>  (actual time=44..44 rows=43 loops=1)
+    -> Aggregate using temporary table  (actual time=44..44 rows=43 loops=1)
+        -> Filter: (o0.discarded_at >= TIMESTAMP'2026-10-22 13:37:33.810867')  (cost=19922 rows=19749) (actual time=1.41..43.9 rows=43 loops=1)
+            -> Index lookup on o0 using oban_jobs_state_queue_priority_scheduled_at_id_index (state='discarded'), with index condition: (o0.state = 'discarded')  (cost=19922 rows=59254) (actual time=0.138..42.6 rows=30000 loops=1)
+
+
+-- Q16
+SELECT o0.`worker`, o0.`queue`, count(o0.`id`) FROM `oban_jobs` AS o0 WHERE ((o0.`state` = ?) AND (o0.`cancelled_at` >= ?)) GROUP BY o0.`worker`, o0.`queue`
+-- params: ["cancelled", ~U[2026-10-22 13:37:33.810867Z]]
+-> Table scan on <temporary>  (actual time=32.5..32.5 rows=27 loops=1)
+    -> Aggregate using temporary table  (actual time=32.5..32.5 rows=27 loops=1)
+        -> Filter: (o0.cancelled_at >= TIMESTAMP'2026-10-22 13:37:33.810867')  (cost=19480 rows=15332) (actual time=0.841..32.4 rows=27 loops=1)
+            -> Index lookup on o0 using oban_jobs_state_queue_priority_scheduled_at_id_index (state='cancelled'), with index condition: (o0.state = 'cancelled')  (cost=19480 rows=46002) (actual time=0.113..31.4 rows=20000 loops=1)
+
+
+-- Q17 (FULL SCAN)
+SELECT o0.`worker`, CAST(max(o0.`inserted_at`) AS datetime(6)), max(o0.`id`) FROM `oban_jobs` AS o0 WHERE (o0.`worker` IN (?,?)) GROUP BY o0.`worker`
+-- params: ["MyApp.Workers.Never", "MyApp.Workers.W7"]
+-> Table scan on <temporary>  (actual time=551..551 rows=1 loops=1)
+    -> Aggregate using temporary table  (actual time=551..551 rows=1 loops=1)
+        -> Filter: (o0.worker in ('MyApp.Workers.Never','MyApp.Workers.W7'))  (cost=25776 rows=197933) (actual time=0.136..549 rows=4000 loops=1)
+            -> Table scan on o0  (cost=25776 rows=989664) (actual time=0.126..312 rows=1e+6 loops=1)
+

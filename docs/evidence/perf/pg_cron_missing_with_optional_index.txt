@@ -1,0 +1,38 @@
+                                                                             QUERY PLAN                                                                              
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Finalize GroupAggregate  (cost=228414.08..228478.67 rows=250 width=34) (actual time=94.306..98.964 rows=1 loops=1)
+   Group Key: worker
+   Buffers: shared hit=261 read=40004
+   ->  Gather Merge  (cost=228414.08..228472.42 rows=500 width=34) (actual time=94.294..98.952 rows=3 loops=1)
+         Workers Planned: 2
+         Workers Launched: 2
+         Buffers: shared hit=261 read=40004
+         ->  Sort  (cost=227414.06..227414.68 rows=250 width=34) (actual time=84.102..84.103 rows=1 loops=3)
+               Sort Key: worker
+               Sort Method: quicksort  Memory: 25kB
+               Buffers: shared hit=261 read=40004
+               Worker 0:  Sort Method: quicksort  Memory: 25kB
+               Worker 1:  Sort Method: quicksort  Memory: 25kB
+               ->  Partial HashAggregate  (cost=227401.60..227404.10 rows=250 width=34) (actual time=84.082..84.084 rows=1 loops=3)
+                     Group Key: worker
+                     Batches: 1  Memory Usage: 37kB
+                     Buffers: shared hit=245 read=40004
+                     Worker 0:  Batches: 1  Memory Usage: 37kB
+                     Worker 1:  Batches: 1  Memory Usage: 37kB
+                     ->  Parallel Bitmap Heap Scan on oban_jobs o0  (cost=2549.86..227152.91 rows=33158 width=34) (actual time=8.596..81.925 rows=13333 loops=3)
+                           Recheck Cond: (worker = ANY ('{MyApp.Workers.Never,MyApp.Workers.W7}'::text[]))
+                           Heap Blocks: exact=13607
+                           Buffers: shared hit=245 read=40004
+                           ->  Bitmap Index Scan on qk_tmp_worker_inserted_at  (cost=0.00..2529.97 rows=79579 width=0) (actual time=7.422..7.422 rows=40000 loops=1)
+                                 Index Cond: (worker = ANY ('{MyApp.Workers.Never,MyApp.Workers.W7}'::text[]))
+                                 Buffers: shared hit=245 read=4
+ Planning:
+   Buffers: shared hit=183 read=38
+ Planning Time: 2.738 ms
+ JIT:
+   Functions: 27
+   Options: Inlining false, Optimization false, Expressions true, Deforming true
+   Timing: Generation 1.275 ms (Deform 0.430 ms), Inlining 0.000 ms, Optimization 0.916 ms, Emission 12.166 ms, Total 14.356 ms
+ Execution Time: 118.478 ms
+(34 rows)
+
