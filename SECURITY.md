@@ -11,12 +11,12 @@ resolved. There is no bug bounty.
 
 ## Supported versions
 
-The project is pre-1.0. Only the latest commit on `main` receives security fixes.
+The project is pre-1.0. Only the latest release (and `main`) receives security fixes.
 
 | Version | Supported | Notes |
 |---|---|---|
-| `main` | yes | |
-| 0.1.0 | no | `mix queue_keeper.check` started the host application (and therefore Oban) and some queries could run for minutes on large tables. See [docs/SECURITY_REVIEW.md](docs/SECURITY_REVIEW.md), findings QK-01 and QK-02. Upgrade to `main`. |
+| 0.2.x | yes | First public release. |
+| 0.1.0 | no | Never tagged or published. `mix queue_keeper.check` started the host application (and therefore Oban) and some queries could run for minutes on large tables. See [docs/SECURITY_REVIEW.md](docs/SECURITY_REVIEW.md), findings QK-01 and QK-02. |
 
 ## Scope
 

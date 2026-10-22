@@ -1,7 +1,7 @@
 defmodule QueueKeeperCheck.MixProject do
   use Mix.Project
 
-  @version "0.1.0"
+  @version "0.2.0"
   @source_url "https://github.com/TitaniumMonkey/Queue-keeper-check"
 
   def project do
@@ -35,7 +35,7 @@ defmodule QueueKeeperCheck.MixProject do
         "Website" => "https://queuekeeper.dev",
         "Changelog" => "#{@source_url}/blob/main/CHANGELOG.md"
       },
-      files: ~w(lib mix.exs README.md LICENSE CHANGELOG.md SECURITY.md .formatter.exs)
+      files: ~w(lib mix.exs README.md LICENSE CHANGELOG.md SECURITY.md)
     ]
   end
 

@@ -6,7 +6,13 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
-Security and production-safety hardening. See `docs/SECURITY_REVIEW.md`.
+## [0.2.0] - 2026-10-22
+
+First public release, and the first version published to Hex. 0.1.0 (below) was an
+internal milestone: it was never tagged, released or published, and it had the
+production-safety problems listed under "Fixed" (see the findings QK-01 to QK-11 in
+`docs/SECURITY_REVIEW.md`). If you pinned a pre-release commit from GitHub, read
+"Changed" before upgrading.
 
 ### Fixed
 
@@ -29,6 +35,8 @@ Security and production-safety hardening. See `docs/SECURITY_REVIEW.md`.
   checks are skipped after a connection error (QK-04).
 - Strict option validation, including an identifier allow-list for `:prefix` (QK-06).
 - `SECURITY.md`, `docs/SECURITY_REVIEW.md`, benchmark and verification scripts.
+- CI on PostgreSQL 17, SQLite and MySQL 8.4, with actions pinned to commit SHAs and
+  `mix hex.audit` (QK-09).
 
 ### Changed
 
@@ -36,8 +44,20 @@ Security and production-safety hardening. See `docs/SECURITY_REVIEW.md`.
   (that part needs a full table scan).
 - `Release.check/2` never raises, starts the repo with a pool of 1 and stops it afterwards.
 - Running `QueueKeeperCheck.run/2` inside an open transaction on Postgres is refused.
+- Errors (bad options, database unreachable, timeouts) now exit with 3 instead of 1, so
+  "could not check" is no longer reported as "warning" (QK-04).
+- Unknown or invalid options raise `ArgumentError` instead of being ignored (QK-06).
 
-## [0.1.0] - 2026-10-22
+### Known limitations
+
+- `:cron_missing` (opt-in) needs a sequential scan; it is bounded by `:statement_timeout` (QK-10).
+- On MySQL and SQLite, read-only enforcement depends on a SELECT-only database user or a
+  read-only connection; the library only issues `SELECT`s (QK-11).
+
+## [0.1.0] - 2026-10-22 (never published)
+
+Initial implementation. Not tagged, released or published; superseded by 0.2.0.
+
 
 ### Added
 
@@ -51,5 +71,6 @@ Security and production-safety hardening. See `docs/SECURITY_REVIEW.md`.
   outside Oban (e.g. system cron).
 - Support for Oban's Basic (PostgreSQL), Lite (SQLite3) and Dolphin (MySQL 8.4+) engines.
 
-[Unreleased]: https://github.com/TitaniumMonkey/Queue-keeper-check/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/TitaniumMonkey/Queue-keeper-check/releases/tag/v0.1.0
+[Unreleased]: https://github.com/TitaniumMonkey/Queue-keeper-check/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/TitaniumMonkey/Queue-keeper-check/releases/tag/v0.2.0
+[0.1.0]: https://github.com/TitaniumMonkey/Queue-keeper-check/commit/48b75a1

@@ -65,8 +65,8 @@ alerts.
 **Verified** with `dev/verify_host_app.sh`, which builds `dev/host_app`: a real app with a
 Repo, Oban (a queue, the Cron plugin and the Pruner), and an `Application.start/2` that
 prints `HOST_APP_STARTED` and inserts a job. Saved outputs:
-[`docs/evidence/host_app_current.txt`](evidence/host_app_current.txt) and
-[`docs/evidence/host_app_v0.1.0.txt`](evidence/host_app_v0.1.0.txt).
+[`docs/evidence/host_app_current.txt`](https://github.com/TitaniumMonkey/Queue-keeper-check/blob/v0.2.0/docs/evidence/host_app_current.txt) and
+[`docs/evidence/host_app_v0.1.0.txt`](https://github.com/TitaniumMonkey/Queue-keeper-check/blob/v0.2.0/docs/evidence/host_app_v0.1.0.txt).
 
 | | v0.1.0 | `main` |
 |---|---|---|
@@ -94,8 +94,8 @@ job data). If the host app forwards Ecto telemetry to an APM, these queries appe
 ## 4. Exact SQL issued
 
 Complete per-engine dumps, captured from telemetry while a test makes every check fire:
-[`postgres.sql`](evidence/sql/postgres.sql), [`myxql.sql`](evidence/sql/myxql.sql),
-[`sqlite3.sql`](evidence/sql/sqlite3.sql). The distinct Postgres statement shapes (`$n` =
+[`postgres.sql`](https://github.com/TitaniumMonkey/Queue-keeper-check/blob/v0.2.0/docs/evidence/sql/postgres.sql), [`myxql.sql`](https://github.com/TitaniumMonkey/Queue-keeper-check/blob/v0.2.0/docs/evidence/sql/myxql.sql),
+[`sqlite3.sql`](https://github.com/TitaniumMonkey/Queue-keeper-check/blob/v0.2.0/docs/evidence/sql/sqlite3.sql). The distinct Postgres statement shapes (`$n` =
 bound parameter) are:
 
 ```sql
@@ -256,7 +256,7 @@ never-seen worker.
 
 "Page cache dropped" means `echo 3 > /proc/sys/vm/drop_caches` before each run, with
 Postgres not restarted (its 128 MB of shared buffers stayed warm). Raw outputs and every
-`EXPLAIN (ANALYZE, BUFFERS)` are in [`docs/evidence/perf/`](evidence/perf/)
+`EXPLAIN (ANALYZE, BUFFERS)` are in [`docs/evidence/perf/`](https://github.com/TitaniumMonkey/Queue-keeper-check/tree/v0.2.0/docs/evidence/perf)
 (`pg_summary.txt`, `pg_explain.txt`, `pg_v0.1.0_baseline_*.txt`).
 
 **Root causes in v0.1.0 (from the saved plans):** sample queries
@@ -269,7 +269,7 @@ code reading, the latter also ran when there were no late queues.
 **Plans on `main`:** every statement uses an index except `:cron_missing` (sequential
 scan, 0.5 s warm). With an optional, application-owned index
 `CREATE INDEX CONCURRENTLY ... ON oban_jobs (worker, inserted_at)` the same query took
-118 ms ([`pg_cron_missing_with_optional_index.txt`](evidence/perf/pg_cron_missing_with_optional_index.txt));
+118 ms ([`pg_cron_missing_with_optional_index.txt`](https://github.com/TitaniumMonkey/Queue-keeper-check/blob/v0.2.0/docs/evidence/perf/pg_cron_missing_with_optional_index.txt));
 the index was dropped afterwards and is not required.
 
 **Bounds now in place:** each query is either an aggregate (one row per queue or worker)
@@ -300,8 +300,8 @@ mix, same box):**
 Both engines have only the composite `(state, queue, priority, scheduled_at, id)` index
 from Oban, so discarded/cancelled windows are read through the state prefix. In
 `EXPLAIN ANALYZE` / `EXPLAIN QUERY PLAN`, every statement except `:cron_missing` used
-that index ([`mysql_explain.txt`](evidence/perf/mysql_explain.txt),
-[`sqlite_explain.txt`](evidence/perf/sqlite_explain.txt)). The roughly 90 ms floor per
+that index ([`mysql_explain.txt`](https://github.com/TitaniumMonkey/Queue-keeper-check/blob/v0.2.0/docs/evidence/perf/mysql_explain.txt),
+[`sqlite_explain.txt`](https://github.com/TitaniumMonkey/Queue-keeper-check/blob/v0.2.0/docs/evidence/perf/sqlite_explain.txt)). The roughly 90 ms floor per
 check on MySQL was not investigated further.
 
 ## 9. Failure behaviour

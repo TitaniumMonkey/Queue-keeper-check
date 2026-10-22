@@ -37,7 +37,7 @@ See [docs/SECURITY_REVIEW.md](docs/SECURITY_REVIEW.md) for the exact SQL, requir
 privileges, measurements and findings, and [SECURITY.md](SECURITY.md) to report a
 vulnerability.
 
-Status: v0.1.0, early. The API may change before 1.0.
+Status: v0.2.0, early. The API may change before 1.0.
 
 > **Pruner caveat (read this first).** Five checks count rows in final states: `:stalled`
 > (recent `attempted_at`), `:retry_storm` (with `include_completed: true`),
@@ -79,11 +79,19 @@ Add the dependency to `mix.exs` (requires Elixir 1.15+, Oban 2.18+, `ecto_sql` 3
 ```elixir
 def deps do
   [
-    # pin a reviewed commit; tags can be moved
-    {:queue_keeper_check, github: "TitaniumMonkey/Queue-keeper-check", ref: "<commit sha>"}
+    {:queue_keeper_check, "~> 0.2"}
   ]
 end
 ```
+
+Or straight from GitHub, pinned to the release tag:
+
+```elixir
+{:queue_keeper_check, github: "TitaniumMonkey/Queue-keeper-check", tag: "v0.2.0"}
+```
+
+Git tags can be moved; for an immutable Git pin use `ref: "<commit sha>"`. Hex packages
+are checksummed in `mix.lock`.
 
 Your app already brings its own database adapter (`postgrex`, `ecto_sqlite3` or `myxql`).
 
@@ -178,7 +186,7 @@ layers cover this:
    */5 * * * * /app/bin/my_app eval 'QueueKeeperCheck.Release.main(MyApp.Repo, otp_app: :my_app)' >> /var/log/queue_check.log 2>&1
    ```
 
-   It exits 0/1/2. With Oban down, due jobs age and nothing is attempted, so `:stalled`
+   It exits 0/1/2/3 (see [Exit codes](#exit-codes)). With Oban down, due jobs age and nothing is attempted, so `:stalled`
    fires; with `:cron_missing` configured, the missing cron worker fires too (both are
    verified end-to-end by stopping Oban and running `Release.check/2`).
 
