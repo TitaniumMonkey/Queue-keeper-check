@@ -42,7 +42,14 @@ defmodule QueueKeeperCheck.MixProject do
   defp docs do
     [
       main: "readme",
-      extras: ["README.md", "CHANGELOG.md", "SECURITY.md", "docs/SECURITY_REVIEW.md", "LICENSE"],
+      extras: [
+        "README.md",
+        "CHANGELOG.md",
+        "SECURITY.md",
+        "docs/SECURITY_REVIEW.md",
+        "docs/OBAN_PRO_COMPATIBILITY.md",
+        "LICENSE"
+      ],
       source_ref: "v#{@version}",
       source_url: @source_url
     ]

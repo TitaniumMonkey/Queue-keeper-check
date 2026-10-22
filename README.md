@@ -7,11 +7,11 @@ queries on `oban_jobs` and reports eight conditions with thresholds:
 
 | Check | Fires when | Default threshold | Severity |
 |---|---|---|---|
-| `:orphaned` | a job has been `executing` far longer than any job should (its node probably died) | 3600 s (Oban Lifeline's default `rescue_after`) | always critical |
+| `:orphaned` | a job has been `executing` far longer than any job should run. It measures execution age only: the job may have been orphaned by a node crash, or may genuinely still be running | 3600 s (Oban Lifeline's default `rescue_after`) | always critical |
 | `:hanging` | a job is `executing` past its worker's time budget | 300 s, per-worker overrides | warning, critical at 2x |
 | `:backlog` | a queue has too many due jobs, or its oldest due job has waited too long | 1000 jobs / 300 s | warning, critical at 2x |
-| `:stalled` | a queue has overdue jobs and nothing in it was attempted recently (queue not running, paused, or leadership/notifier broken) | latency 300 s + no attempt in 60 s | always critical |
-| `:retry_storm` | one worker has many retrying or retried jobs in a short window (completed retries only with `include_completed: true`) | 20 jobs / 300 s | warning, critical at 2x |
+| `:stalled` | a queue has overdue jobs and nothing in it was attempted recently (queue not running, paused, or leadership/notifier broken; also a queue whose every slot is busy with long-running jobs) | latency 300 s + no attempt in 60 s | always critical |
+| `:retry_storm` | one worker has many jobs that failed within the window and are awaiting retry, or were retried within the window (completed retries only with `include_completed: true`) | 20 jobs / 300 s | warning, critical at 2x |
 | `:discarded` | discarded-job spike for a worker (silent failures) | 5 / 3600 s | warning, critical at 2x |
 | `:cancelled` | cancelled-job spike for a worker | 10 / 3600 s | warning, critical at 2x |
 | `:cron_missing` | an expected (usually cron) worker has had no job inserted for too long | off until you list workers | always critical |
@@ -58,6 +58,14 @@ The same unit suite runs against each engine (see [Development and tests](#devel
 | `Oban.Engines.Basic` | PostgreSQL | Tested: PostgreSQL 17.11, Oban 2.24.2 |
 | `Oban.Engines.Lite` | SQLite3 | Tested: SQLite via `ecto_sqlite3` 0.26.0 / `exqlite` 0.43.0, Oban 2.24.2 |
 | `Oban.Engines.Dolphin` | MySQL 8.4+ | Tested: MySQL 8.4.9 LTS (official generic Linux tarball) via `myxql` 0.9.0, Oban 2.24.2. MariaDB is not supported by Oban and not tested |
+| `Oban.Pro.Engine` (formerly `Oban.Pro.Engines.Smart`) | PostgreSQL | **Not tested.** Likely compatible, unverified: Oban Pro requires a paid license, which this project does not have |
+
+Oban Pro: from Pro's public documentation, the Pro engine keeps jobs in the same `oban_jobs`
+table with the same states, so the queries should run, but some Pro features can make checks
+report false results (rate-limited or globally limited queues look backed up or stalled; Pro's
+`DynamicPruner`/`Oban.Pro.Pruner` keeps only 1,000 finished jobs by default; archived or
+partitioned tables change what is visible). Read
+[docs/OBAN_PRO_COMPATIBILITY.md](docs/OBAN_PRO_COMPATIBILITY.md) before relying on it with Pro.
 
 Notes on SQLite: there are no schemas, so no prefix is passed (the Postgres default is
 `"public"`). Timestamps are ISO-8601 text; Oban's column defaults write whole seconds
@@ -74,24 +82,21 @@ the server/session `time_zone` does not matter (verified with the server in UTC-
 
 ## Installation
 
-Add the dependency to `mix.exs` (requires Elixir 1.15+, Oban 2.18+, `ecto_sql` 3.10+):
+Requires Elixir 1.15+, Oban 2.18+, `ecto_sql` 3.10+.
+
+**Not yet published to Hex.** Install it from GitHub, pinned to the release tag:
 
 ```elixir
 def deps do
   [
-    {:queue_keeper_check, "~> 0.2"}
+    {:queue_keeper_check, github: "TitaniumMonkey/Queue-keeper-check", tag: "v0.2.0"}
   ]
 end
 ```
 
-Or straight from GitHub, pinned to the release tag:
-
-```elixir
-{:queue_keeper_check, github: "TitaniumMonkey/Queue-keeper-check", tag: "v0.2.0"}
-```
-
-Git tags can be moved; for an immutable Git pin use `ref: "<commit sha>"`. Hex packages
-are checksummed in `mix.lock`.
+Git tags can be moved; for an immutable pin use `ref: "<commit sha>"` (`mix.lock` records
+the commit either way). Once it is on Hex, `{:queue_keeper_check, "~> 0.2"}` will work and
+the package will be checksummed in `mix.lock`.
 
 Your app already brings its own database adapter (`postgrex`, `ecto_sqlite3` or `myxql`).
 
@@ -186,9 +191,10 @@ layers cover this:
    */5 * * * * /app/bin/my_app eval 'QueueKeeperCheck.Release.main(MyApp.Repo, otp_app: :my_app)' >> /var/log/queue_check.log 2>&1
    ```
 
-   It exits 0/1/2/3 (see [Exit codes](#exit-codes)). With Oban down, due jobs age and nothing is attempted, so `:stalled`
-   fires; with `:cron_missing` configured, the missing cron worker fires too (both are
-   verified end-to-end by stopping Oban and running `Release.check/2`).
+   It exits 0/1/2/3 (see [Exit codes](#exit-codes)). With Oban down, due jobs age and nothing
+   is attempted, so `:stalled` fires; with `:cron_missing` configured, the missing cron worker
+   fires too. (The test suite covers both conditions on every engine, and
+   `dev/verify_host_app.sh` checks that `Release` runs without starting the app or Oban.)
 
 2. **Tell someone outside your infrastructure that the check ran.** Cron can die too
    (host gone, crontab lost). Report every run to a dead-man's-switch service; if the pings
@@ -202,10 +208,49 @@ layers cover this:
 
    This is the library's only network-shaped advice; the library itself never calls out.
 
+## Piloting safely
+
+Don't wire it straight to your pager. Roll it out in stages:
+
+1. **Report-only first.** Run it on its normal schedule but only log the report (e.g.
+   `Logger.info(QueueKeeperCheck.format(report))`, or append the `--json` output to a file).
+   No paging, no Slack.
+2. **Measure for a week or two.** For every finding, record:
+   * was it a **false positive** (nothing was actually wrong)?
+   * was it a **useful detection** (a real problem, ideally one you didn't already know about)?
+   * **what action an engineer took** because of it (none, investigated, fixed something)?
+   * the **query cost**: how long each run takes (time the call, or watch
+     `pg_stat_statements` / your database's slow-query log) and whether it shows up in your
+     database metrics at all.
+3. **Tune thresholds** from what you measured: per-worker `hanging` budgets for slow workers,
+   `backlog` depth/latency that matches your traffic, `min_*` counts and windows for the spike
+   checks. Turn off (`only:`) checks that don't earn their keep.
+4. **Then route to alerts**, starting with `:critical` only, and keep the report-only log
+   for comparison.
+
+**History-based checks depend on retention.** `:stalled` (recent attempts), `:retry_storm`
+with `include_completed: true`, `:discarded`, `:cancelled` and `:cron_missing` read jobs in
+final states, so they only see as far back as your Pruner keeps rows (see the Pruner
+caveat near the top). Prefer shrinking the check windows to fit your
+existing pruning (e.g. `discarded: [window: 60]` with the default 60 s `max_age`) over
+raising retention just for the checker: longer retention means a bigger `oban_jobs` table for
+Oban itself, which is a cost you should take on for your own reasons, not for this library.
+
 ## Caveats
-- Pruner window: see the caveat at the top. In short, `max_age` must cover your largest window.
-- `:orphaned` overlaps with Oban's Lifeline plugin: if Lifeline is on, orphans are rescued and
-  this check mostly sees them only before the rescue runs.
+- Pruner window: see the caveat at the top. In short, `max_age` must cover your largest window,
+  or the windows must shrink to fit `max_age`.
+- `:orphaned` measures execution age only (`executing` with `attempted_at` older than the
+  limit). It cannot tell a job orphaned by a node crash from one that is legitimately still
+  running; set the limit above your longest legitimate runtime. It overlaps with Oban's
+  Lifeline plugin: if Lifeline is on, orphans are rescued and this check mostly sees them only
+  before the rescue runs.
+- `:stalled` also fires when every slot of a queue is held by long-running jobs and due work
+  is waiting, because nothing was *attempted* in the activity window. `:hanging`/`:orphaned`
+  findings for the same queue point to that case.
+- `:retry_storm` counts a `retryable` job by its last failed attempt (`attempted_at`), so a
+  job failing once and then waiting out a long backoff drops out of the window. Database and
+  application clocks skewed by more than a job's backoff can make a just-failed job miss the
+  window.
 - Ages are whole seconds.
 
 ## Development and tests
