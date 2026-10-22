@@ -24,3 +24,44 @@ config :queue_keeper_check, QueueKeeperCheck.MyRepo,
   port: String.to_integer(System.get_env("QK_MYSQL_PORT", "3307")),
   database: "queue_keeper_check_test",
   pool: Ecto.Adapters.SQL.Sandbox
+
+# --- repos used only by the safety tests (test/safety_test.exs) ---------------------------
+# Least-privilege role: SELECT on one table, created by the tests.
+config :queue_keeper_check, QueueKeeperCheck.RoRepo,
+  username: "qk_readonly",
+  password: "qk-readonly-test-pw",
+  hostname: "localhost",
+  database: "queue_keeper_check_test"
+
+# Nothing listens on port 1: "database down".
+config :queue_keeper_check, QueueKeeperCheck.DownRepo,
+  username: "postgres",
+  password: "qk-down-secret-pw",
+  hostname: "127.0.0.1",
+  port: 1,
+  database: "queue_keeper_check_test",
+  queue_target: 200,
+  queue_interval: 500
+
+# Wrong password.
+config :queue_keeper_check, QueueKeeperCheck.BadPwRepo,
+  username: "postgres",
+  password: "qk-wrong-secret-pw",
+  hostname: "localhost",
+  database: "queue_keeper_check_test",
+  queue_target: 200,
+  queue_interval: 500
+
+# SQLite opened read-only (same file as LiteRepo).
+config :queue_keeper_check, QueueKeeperCheck.LiteRoRepo,
+  database: Path.expand("../tmp/queue_keeper_check_test.sqlite3", __DIR__),
+  mode: :readonly,
+  pool_size: 1
+
+# MySQL least-privilege user (QK_MYSQL=1 only).
+config :queue_keeper_check, QueueKeeperCheck.MyRoRepo,
+  username: "qk_readonly",
+  password: "qk-readonly-test-pw",
+  hostname: System.get_env("QK_MYSQL_HOST", "127.0.0.1"),
+  port: String.to_integer(System.get_env("QK_MYSQL_PORT", "3307")),
+  database: "queue_keeper_check_test"
