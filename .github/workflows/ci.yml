@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   test:
-    name: Test (Postgres + SQLite)
+    name: Test (Postgres 17 + SQLite + MySQL 8.4)
     runs-on: ubuntu-latest
 
     services:
@@ -25,19 +25,31 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ALLOW_EMPTY_PASSWORD: "yes"
+        ports: ["3307:3306"]
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
 
     env:
       MIX_ENV: test
+      QK_MYSQL: "1"
 
     steps:
-      - uses: actions/checkout@v4
+      # Actions pinned to commit SHAs (tag in the comment).
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: erlef/setup-beam@v1
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1
         with:
           elixir-version: "1.18"
           otp-version: "27"
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             deps
@@ -45,6 +57,7 @@ jobs:
           key: ${{ runner.os }}-mix-${{ hashFiles('mix.lock') }}
 
       - run: mix deps.get
+      - run: mix hex.audit
       - run: mix format --check-formatted
       - run: mix compile --warnings-as-errors
       - run: mix test

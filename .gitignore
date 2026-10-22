@@ -10,3 +10,4 @@ erl_crash.dump
 *.ez
 queue_keeper_check-*.tar
 .DS_Store
+/bench/results/
