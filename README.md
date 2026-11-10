@@ -47,7 +47,7 @@ See [docs/SECURITY_REVIEW.md](docs/SECURITY_REVIEW.md) for the exact SQL, requir
 privileges, measurements and findings, and [SECURITY.md](SECURITY.md) to report a
 vulnerability.
 
-Status: v0.3.0, early. The API may change before 1.0.
+Status: v0.4.0, early. The API may change before 1.0.
 
 > **Pruner caveat (read this first).** Several checks depend on rows in final states:
 > `:stalled` (recent `attempted_at`), `:retry_storm` (with `include_completed: true`),
@@ -106,13 +106,13 @@ Add the dependency to `mix.exs`:
 ```elixir
 def deps do
   [
-    {:queue_keeper_check, "~> 0.3.0"}
+    {:queue_keeper_check, "~> 0.4.0"}
   ]
 end
 ```
 
 Hex packages are checksummed in `mix.lock`. Or straight from GitHub, pinned to the release
-tag (`tag: "v0.3.0"`); git tags can be moved, so for an immutable git pin use
+tag (`tag: "v0.4.0"`); git tags can be moved, so for an immutable git pin use
 `ref: "<commit sha>"`.
 
 Your app already brings its own database adapter (`postgrex`, `ecto_sqlite3` or `myxql`).

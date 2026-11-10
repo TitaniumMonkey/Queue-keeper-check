@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-10
+
 ### Added
 
 - `:dead_worker_candidates` (opt-in, report-only): combined review of enqueue
@@ -26,7 +28,9 @@ All notable changes to this project are documented here. The format follows
   same 7-day implicit default applies to `:dead_worker_candidates`. The window
   remains any positive integer; set `window_days: 14` to keep the previous
   implicit window. The standalone `:dead_workers` comparison is still a strict
-  `age > window` (exactly N days does not fire).
+  `age > window` (exactly N days does not fire). This is a breaking change to
+  that implicit default, so this is a minor (0.4.0) bump rather than a patch.
+- The documented Hex dependency version is `~> 0.4.0`.
 
 ## [0.3.0] - 2026-11-10
 
@@ -188,8 +192,9 @@ Initial implementation. Not tagged, released or published; superseded by 0.2.0.
   outside Oban (e.g. system cron).
 - Support for Oban's Basic (PostgreSQL), Lite (SQLite3) and Dolphin (MySQL 8.4+) engines.
 
-[Unreleased]: https://github.com/TitaniumMonkey/Queue-keeper-check/compare/v0.2.1...HEAD
-[0.3.0]: https://github.com/TitaniumMonkey/Queue-keeper-check/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/TitaniumMonkey/Queue-keeper-check/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/TitaniumMonkey/Queue-keeper-check/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/TitaniumMonkey/Queue-keeper-check/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/TitaniumMonkey/Queue-keeper-check/releases/tag/v0.2.1
 [0.2.0]: https://github.com/TitaniumMonkey/Queue-keeper-check/releases/tag/v0.2.0
 [0.1.0]: https://github.com/TitaniumMonkey/Queue-keeper-check/commit/48b75a1
