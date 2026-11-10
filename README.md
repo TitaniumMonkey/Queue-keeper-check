@@ -15,7 +15,7 @@ queries on `oban_jobs` and reports nine conditions with thresholds:
 | `:discarded` | discarded-job spike for a worker (silent failures) | 5 / 3600 s | warning, critical at 2x |
 | `:cancelled` | cancelled-job spike for a worker | 10 / 3600 s | warning, critical at 2x |
 | `:cron_missing` | an expected (usually cron) worker has had no job inserted for too long | off until you list workers | always critical |
-| `:dead_workers` | a worker has had no job inserted within a window of any positive integer number of days (possible dead code). Uses last enqueue. Prefers the opt-in last-seen ledger when attached; otherwise reads `oban_jobs` and stays silent when history is shorter than the window | off until you set `window_days` (7, 14 and 30 are examples; 14 is the default if you only set `known` or `discover: true`) | always warning |
+| `:dead_workers` | a worker has had no job inserted within a window of any positive integer number of days (enqueue inactivity, not proof of unused code). Uses last enqueue and reports leftover nonterminal/future jobs. Prefers the opt-in last-seen ledger when attached; otherwise reads `oban_jobs` and stays silent when history is shorter than the window | off until you set `window_days` (7, 14 and 30 are examples; 14 is the default if you only set `known` or `discover: true`) | always warning |
 
 "Due" means `available`, or `scheduled`/`retryable` whose `scheduled_at` has passed. Job `args`,
 `meta` and `errors` are never read. Nothing is sent anywhere; you decide where the report goes.
@@ -253,13 +253,15 @@ user needs `INSERT`/`UPDATE` as well.
 
 `mix queue_keeper.dead_code` lists compiled `Oban.Worker` modules with no static call
 sites (`Worker.new`, `Oban.insert`, `Oban.Job.new(..., worker: ...)`, and similar) and
-not present in Oban or Oban Pro crontab config. It needs the project compiled; it does
-not start the application or Oban.
+not present in Oban or Oban Pro crontab config. Those modules are **review
+candidates**, not proven dead code. It needs the project compiled; it does not start
+the application or Oban. The report includes coverage (beams scanned, missing debug
+info). JSON has `review_candidates` and a deprecated `dead` alias for the same list.
 
 A worker enqueued only through dynamic dispatch (`Module.concat`, `apply/3` on a
 string, a name from the database) will appear here even if production still runs it.
 Runtime-only Pro cron rules stored in the database are not visible; list those in
-`--ignore`. Treat the output as candidates, not proof.
+`--ignore`. Missing BEAM debug info makes the scan incomplete.
 
 ## When Oban itself is down
 

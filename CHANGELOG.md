@@ -6,6 +6,25 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- `mix queue_keeper.dead_code` / `QueueKeeperCheck.DeadCode`: workers with no static
+  callers are classified as `:review_candidate`, not `:dead`. This is not proof of
+  unused code (dynamic dispatch, future-scheduled jobs, missing debug info). New
+  `scan_report/1` returns coverage (`beams_scanned`, `beams_missing_debug_info`,
+  `complete?`, and related keys). `review_candidates/1` is the preferred helper;
+  `dead_workers/1` remains as an alias. JSON output adds `review_candidates` and
+  `coverage`; the `dead` key is kept as a deprecated alias for the same list.
+  Caller lookup no longer creates atoms from worker-name strings
+  (`String.to_existing_atom` only). Umbrella compile paths use `Mix.Project.apps_paths/0`
+  values instead of assuming `apps/<app>`.
+- `:dead_workers` findings no longer say "this may be dead code". A bounded
+  `state IN (available, scheduled, retryable, executing, suspended)` query surfaces
+  leftover nonterminal and future-scheduled jobs. No recent enqueue with pending
+  work is reported as inactivity, not unused code. Short-history messages now say
+  "insufficient history" rather than "cannot determine dead workers". Do not raise
+  Pruner `max_age` for this check.
+
 ## [0.3.0] - 2026-11-10
 
 Not tagged or published to Hex yet.

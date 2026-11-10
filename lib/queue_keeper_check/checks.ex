@@ -408,9 +408,14 @@ defmodule QueueKeeperCheck.Checks do
   # `report_short_history`). Without a ledger, fall back to `max(inserted_at)` on
   # oban_jobs; if the oldest finished row is newer than the window, do not flag.
   #
+  # When a worker is flagged for no recent enqueue, a second, state-bounded
+  # query reports leftover nonterminal jobs (including future `scheduled` and
+  # core/Pro `suspended`). No recent enqueue is not treated as unused code.
+  #
   # Cost of the fallback: `worker` and `inserted_at` are not indexed by Oban, so that
   # path is a sequential scan of oban_jobs, like `:cron_missing`, bounded by
-  # `statement_timeout`.
+  # `statement_timeout`. The pending-job query is filtered on `state IN (...)`
+  # and can use Oban's standard state-prefixed indexes.
 
   @default_dead_window_days 14
   @seconds_per_day 86_400
@@ -441,6 +446,7 @@ defmodule QueueKeeperCheck.Checks do
       |> Enum.uniq()
 
     {source, history_secs, latest} = dead_workers_activity(repo, uw, now, qopts)
+    pending = pending_by_worker(repo, qopts)
 
     workers =
       latest
@@ -457,23 +463,45 @@ defmodule QueueKeeperCheck.Checks do
           history_secs >= window_secs,
           {at, id, n} = Map.get(latest, worker, {nil, nil, 0}),
           is_nil(at) or age(at, now) > window_secs do
+        {pending_status, pending_count, next_at, pending_id} =
+          case pending do
+            {:ok, map} ->
+              {n, at, id} = Map.get(map, worker, {0, nil, nil})
+              {:ok, n, at, id}
+
+            :error ->
+              {:error, 0, nil, nil}
+          end
+
         {value, detail} =
           if at,
             do: {age(at, now), "last inserted #{age(at, now)}s ago"},
             else: {nil, "no rows at all (never inserted, or pruned)"}
 
+        job_ids =
+          [id, pending_id]
+          |> Enum.reject(&is_nil/1)
+          |> Enum.uniq()
+
         %Finding{
           check: :dead_workers,
           severity: :warning,
           worker: worker,
-          count: n,
+          count: max(n, pending_count),
           value: value,
           threshold: window_secs,
-          job_ids: List.wrap(id),
+          job_ids: job_ids,
           message:
-            "#{worker} has had no job inserted within #{days} days (#{window_secs}s): #{detail}. " <>
-              "This may be dead code; add the worker to dead_workers ignore, or a " <>
-              "longer per-worker override, if it is meant to run rarely."
+            inactivity_message(
+              worker,
+              days,
+              window_secs,
+              detail,
+              pending_status,
+              pending_count,
+              next_at,
+              now
+            )
         }
       end
 
@@ -537,18 +565,91 @@ defmodule QueueKeeperCheck.Checks do
     history_desc = if history_secs > 0, do: "#{history_secs}s", else: "just started"
 
     "dead_workers window (#{days} days / #{threshold}s) exceeds the ledger's recording " <>
-      "age (#{history_desc}). Cannot determine dead workers without false positives. " <>
-      "Keep the ledger attached; findings start once it has been recording for #{days} " <>
-      "days. Do not raise the Pruner max_age just for this check."
+      "age (#{history_desc}). Insufficient history to report enqueue inactivity without " <>
+      "false positives. Keep the ledger attached; findings start once it has been " <>
+      "recording for #{days} days. Do not raise the Pruner max_age just for this check."
   end
 
   defp short_history_message(:jobs, days, threshold, history_secs) do
     history_desc = if history_secs > 0, do: "#{history_secs}s", else: "no finished rows"
 
     "dead_workers window (#{days} days / #{threshold}s) exceeds observable " <>
-      "finished-job history (#{history_desc}). Cannot determine dead workers without " <>
-      "false positives. Attach QueueKeeperCheck.Ledger so this check does not depend " <>
-      "on Pruner retention, or shrink window_days."
+      "finished-job history (#{history_desc}). Insufficient history to report enqueue " <>
+      "inactivity without false positives. Attach QueueKeeperCheck.Ledger so this " <>
+      "check does not depend on Pruner retention, or shrink window_days."
+  end
+
+  # Nonterminal Oban states (core Job.unique_states(:incomplete), including
+  # `:suspended` which exists in Oban >= 2.21 / migrations v14). Bounded by
+  # the leading `state` column of Oban's standard indexes; not a full-table
+  # GROUP BY the way the enqueue-activity fallback is.
+  @incomplete_job_states ~w(available scheduled retryable executing suspended)
+
+  defp pending_by_worker(repo, qopts) do
+    # Rescued: a failed pending SELECT must not drop the inactivity findings
+    # (SQLite/MySQL may reject a schema prefix that only applies to Postgres).
+    try do
+      rows =
+        from(j in Job,
+          where: j.state in @incomplete_job_states,
+          group_by: j.worker,
+          select:
+            {j.worker, count(j.id), type(min(j.scheduled_at), :utc_datetime_usec), max(j.id)}
+        )
+        |> repo.all(qopts)
+
+      {:ok, Map.new(rows, fn {w, n, at, id} -> {w, {n, at, id}} end)}
+    rescue
+      _ -> :error
+    end
+  end
+
+  defp inactivity_message(
+         worker,
+         days,
+         window_secs,
+         detail,
+         pending_status,
+         pending_count,
+         next_at,
+         now
+       ) do
+    base =
+      "#{worker} has had no job inserted within #{days} days (#{window_secs}s): #{detail}."
+
+    cond do
+      pending_status == :error ->
+        base <>
+          " Could not query leftover nonterminal jobs (insufficient evidence about " <>
+          "pending work). This is enqueue inactivity, not proof of unused code; add " <>
+          "the worker to dead_workers ignore, or a longer per-worker override, if it " <>
+          "is meant to run rarely."
+
+      pending_count > 0 ->
+        next =
+          cond do
+            is_nil(next_at) ->
+              ""
+
+            DateTime.compare(next_at, now) == :gt ->
+              " next scheduled_at is #{DateTime.diff(next_at, now)}s from now"
+
+            true ->
+              " oldest pending scheduled_at is #{DateTime.diff(now, next_at)}s ago"
+          end
+
+        base <>
+          " #{pending_count} job(s) are still pending in nonterminal states" <>
+          " (available, scheduled, retryable, executing, or suspended);" <>
+          next <>
+          ". No recent enqueue is not evidence of unused code."
+
+      true ->
+        base <>
+          " No nonterminal jobs remain for this worker. This is enqueue inactivity, " <>
+          "not proof of unused code; add the worker to dead_workers ignore, or a " <>
+          "longer per-worker override, if it is meant to run rarely."
+    end
   end
 
   defp discovered_workers do

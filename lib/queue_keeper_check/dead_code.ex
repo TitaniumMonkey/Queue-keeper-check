@@ -6,7 +6,9 @@ defmodule QueueKeeperCheck.DeadCode do
   This answers a different question from `:dead_workers`: not "has this worker
   been enqueued in the last N days?" but "does anything in the compiled code
   appear to enqueue it?" It does not need job history or a longer Pruner
-  `max_age`.
+  `max_age`. Absence of a static caller is **not** proof the worker is unused:
+  jobs may still be scheduled, enqueued dynamically, or referenced from a beam
+  this scan could not read.
 
   The scan needs the host project **compiled** (`mix compile`). It walks
   `Application.spec/2` modules (with `Code.ensure_loaded/1`, not
@@ -15,18 +17,25 @@ defmodule QueueKeeperCheck.DeadCode do
   entries are not part of that graph, so crontab is parsed separately from
   loaded Application env.
 
-  **False positives (reported as dead, but still used):** a worker enqueued only
-  through dynamic dispatch (`Module.concat`, `apply/3` on a string or variable,
-  `Oban.insert` with a worker name built at runtime, or a name stored in the
-  database). Those have no static call site.
+  Workers with no static callers are classified as `:review_candidate`, not as
+  proven dead code. `scan_report/1` also returns coverage: beams scanned, beams
+  missing debug info, empty compile paths, and whether results are complete.
 
-  **False negatives (not reported, but unused):** none that we know of for a
-  worker that is still referenced by a module atom in compiled code, even if
-  that reference is `apply(MyApp.Worker, :new, ...)`.
+  **Review candidates that may still be used:** a worker enqueued only through
+  dynamic dispatch (`Module.concat`, `apply/3` on a string or variable,
+  `Oban.insert` with a worker name built at runtime, or a name stored in the
+  database); a worker whose only callers live in a beam without debug info;
+  runtime-only cron. Those have no static call site this scan can see.
+
+  **Limitations that can hide a real caller (false "no call sites"):** missing
+  BEAM debug info, compile paths the scan did not walk, and dynamic dispatch.
+  A module atom still present in compiled debug info is treated as a caller,
+  even if that reference is `apply(MyApp.Worker, :new, ...)`.
 
   Runtime-only cron (Oban Pro DynamicCron / `Oban.Pro.Cron` rules added in the
   database and not present in config) is **not** scanned; those workers can be
-  listed in `:ignore`.
+  listed in `:ignore`. Oban Pro cron parsing beyond Application env is
+  unverified (no Pro license in this project's tests).
 
   Used by `mix queue_keeper.dead_code`.
   """
@@ -47,42 +56,89 @@ defmodule QueueKeeperCheck.DeadCode do
   * `:known` — extra worker name strings to include even if discover misses them
   * `:cron` — extra worker name strings to treat as cron (in addition to config)
   * `:callers` — optional `%{worker_name => [file]}` to inject in tests
+  * `:beam_roots` — directories of `.beam` files to walk for callers (default:
+    the Mix compile path, plus each umbrella app's compile path). Intended for
+    tests and for running the scan without Mix.Project
+  * `:beam_paths` — extra `.beam` files to include in the caller walk
   """
   def scan(opts \\ []) when is_list(opts) do
+    %{workers: workers} = scan_report(opts)
+    workers
+  end
+
+  @doc """
+  Like `scan/1`, plus a coverage map so callers can tell incomplete discovery
+  from a confident empty caller list.
+
+  Coverage keys: `:beams_scanned`, `:beams_ok`, `:beams_missing_debug_info`,
+  `:beams_unreadable`, `:compile_paths_empty`, `:apps`, `:complete?`.
+  `complete?` is true only when at least one beam was scanned and none were
+  missing debug info or unreadable.
+  """
+  def scan_report(opts \\ []) when is_list(opts) do
     ignore = MapSet.new(List.wrap(opts[:ignore]))
     extra_cron = MapSet.new(List.wrap(opts[:cron]))
     cron = MapSet.union(cron_workers_from_env(), extra_cron)
 
-    discovered = discover_workers(opts[:apps])
+    apps = opts[:apps] || default_apps()
+    discovered = discover_workers(apps)
     known = List.wrap(opts[:known])
     workers = Enum.uniq(discovered ++ known)
 
-    callers = opts[:callers] || callers_of(workers)
+    {callers, coverage} =
+      case opts[:callers] do
+        nil ->
+          callers_of(workers, opts)
 
-    workers
-    |> Enum.reject(&MapSet.member?(ignore, &1))
-    |> Enum.sort()
-    |> Enum.map(fn worker ->
-      files = Map.get(callers, worker, [])
-      in_cron? = MapSet.member?(cron, worker)
-
-      cond do
-        files != [] ->
-          %{worker: worker, status: :live, reason: :callers, files: files}
-
-        in_cron? ->
-          %{worker: worker, status: :live, reason: :cron, files: []}
-
-        true ->
-          %{worker: worker, status: :dead, reason: :no_call_sites, files: []}
+        injected ->
+          {injected, coverage(opts, _scanned = 0, _ok = 0, _missing = 0, _bad = 0)}
       end
-    end)
+
+    coverage =
+      coverage
+      |> Map.put(:apps, apps)
+      |> Map.put(:workers_discovered, length(discovered))
+      |> Map.put(:workers_known, length(known))
+      |> Map.put(:cron_from_env, MapSet.size(cron_workers_from_env()))
+
+    results =
+      workers
+      |> Enum.reject(&MapSet.member?(ignore, &1))
+      |> Enum.sort()
+      |> Enum.map(fn worker ->
+        files = Map.get(callers, worker, [])
+        in_cron? = MapSet.member?(cron, worker)
+
+        cond do
+          files != [] ->
+            %{worker: worker, status: :live, reason: :callers, files: files}
+
+          in_cron? ->
+            %{worker: worker, status: :live, reason: :cron, files: []}
+
+          true ->
+            %{worker: worker, status: :review_candidate, reason: :no_call_sites, files: []}
+        end
+      end)
+
+    %{workers: results, coverage: coverage}
   end
 
-  @doc "Worker names with no static callers and not in cron."
-  def dead_workers(opts \\ []) do
-    for %{status: :dead, worker: worker} <- scan(opts), do: worker
+  @doc """
+  Worker names with no static callers and not in cron.
+
+  These are review candidates, not proven dead code. Prefer this name over
+  `dead_workers/1`.
+  """
+  def review_candidates(opts \\ []) do
+    for %{status: :review_candidate, worker: worker} <- scan(opts), do: worker
   end
+
+  @doc """
+  Same as `review_candidates/1`. Kept so existing call sites keep working;
+  the status atom returned by `scan/1` is `:review_candidate`, not `:dead`.
+  """
+  def dead_workers(opts \\ []), do: review_candidates(opts)
 
   @doc false
   def discover_workers(apps) do
@@ -179,53 +235,112 @@ defmodule QueueKeeperCheck.DeadCode do
 
   defp crontab_workers(_), do: []
 
-  defp callers_of(workers) do
-    wanted =
-      Map.new(workers, fn name ->
-        {Module.concat([name]), name}
+  defp callers_of(workers, opts) do
+    paths = compile_beams(opts)
+
+    # Walk beams first so debug_info decoding can intern module atoms before
+    # we resolve `:known` names. Never create atoms from worker-name strings
+    # (`Module.concat` / `String.to_atom`); use existing atoms only.
+    {callers_acc, scanned, ok, missing, bad} =
+      Enum.reduce(paths, {%{}, 0, 0, 0, 0}, fn path, {acc, scanned, ok, missing, bad} ->
+        scanned = scanned + 1
+
+        case referenced_modules(path) do
+          {:ok, file, mods} ->
+            acc =
+              Enum.reduce(mods, acc, fn mod, acc ->
+                Map.update(acc, mod, [file], fn files -> Enum.uniq([file | files]) end)
+              end)
+
+            {acc, scanned, ok + 1, missing, bad}
+
+          :missing_debug_info ->
+            {acc, scanned, ok, missing + 1, bad}
+
+          :error ->
+            {acc, scanned, ok, missing, bad + 1}
+        end
       end)
 
-    Enum.reduce(compile_beams(), %{}, fn path, acc ->
-      case referenced_modules(path) do
-        {:ok, file, mods} ->
-          Enum.reduce(mods, acc, fn mod, acc ->
-            case Map.get(wanted, mod) do
-              nil ->
-                acc
+    wanted =
+      workers
+      |> Enum.flat_map(fn name ->
+        case existing_elixir_module(name) do
+          nil -> []
+          mod -> [{mod, name}]
+        end
+      end)
+      |> Map.new()
 
-              name ->
-                Map.update(acc, name, [file], fn files -> Enum.uniq([file | files]) end)
-            end
-          end)
+    callers =
+      Enum.reduce(wanted, %{}, fn {mod, name}, acc ->
+        case Map.get(callers_acc, mod) do
+          nil -> acc
+          files -> Map.put(acc, name, files)
+        end
+      end)
 
-        :error ->
-          acc
-      end
-    end)
+    {callers, coverage(opts, scanned, ok, missing, bad)}
   end
 
-  defp compile_beams do
-    paths =
-      if function_exported?(Mix.Project, :compile_path, 0) do
-        umbrella =
-          if function_exported?(Mix.Project, :apps_paths, 0) and Mix.Project.umbrella?() do
-            for {app, _} <- Mix.Project.apps_paths() do
-              Mix.Project.in_project(app, "apps/#{app}", fn _ -> Mix.Project.compile_path() end)
-            end
-          else
-            []
-          end
+  defp existing_elixir_module(name) when is_binary(name) do
+    try do
+      String.to_existing_atom("Elixir." <> name)
+    rescue
+      ArgumentError ->
+        nil
+    end
+  end
 
-        [Mix.Project.compile_path() | umbrella]
-      else
-        []
+  defp coverage(_opts, scanned, ok, missing, bad) do
+    %{
+      beams_scanned: scanned,
+      beams_ok: ok,
+      beams_missing_debug_info: missing,
+      beams_unreadable: bad,
+      compile_paths_empty: scanned == 0,
+      complete?: scanned > 0 and missing == 0 and bad == 0
+    }
+  end
+
+  defp compile_beams(opts) do
+    dirs =
+      case opts[:beam_roots] do
+        nil -> default_compile_dirs()
+        roots -> List.wrap(roots)
       end
 
-    for dir <- Enum.uniq(Enum.reject(paths, &is_nil/1)),
-        File.dir?(dir),
-        file <- File.ls!(dir),
-        String.ends_with?(file, ".beam"),
-        do: Path.join(dir, file)
+    from_dirs =
+      for dir <- Enum.uniq(Enum.reject(dirs, &is_nil/1)),
+          File.dir?(dir),
+          file <- File.ls!(dir),
+          String.ends_with?(file, ".beam"),
+          do: Path.join(dir, file)
+
+    extras =
+      for path <- List.wrap(opts[:beam_paths]),
+          is_binary(path),
+          File.regular?(path),
+          do: path
+
+    Enum.uniq(from_dirs ++ extras)
+  end
+
+  defp default_compile_dirs do
+    if function_exported?(Mix.Project, :compile_path, 0) do
+      umbrella =
+        if function_exported?(Mix.Project, :apps_paths, 0) and Mix.Project.umbrella?() do
+          for {app, path} <- Mix.Project.apps_paths() do
+            Mix.Project.in_project(app, path, fn _ -> Mix.Project.compile_path() end)
+          end
+        else
+          []
+        end
+
+      [Mix.Project.compile_path() | umbrella]
+    else
+      []
+    end
   end
 
   defp referenced_modules(path) do
@@ -242,7 +357,18 @@ defmodule QueueKeeperCheck.DeadCode do
 
       {:ok, file || source_from_mod(mod) || path, mods}
     else
-      _ -> :error
+      {:error, :beam_lib, {:missing_chunk, _, chunk}}
+      when chunk in [:debug_info, ~c"Dbgi"] ->
+        :missing_debug_info
+
+      {:error, :beam_lib, {:no_debug_info, _}} ->
+        :missing_debug_info
+
+      {:ok, {_mod, chunks}} ->
+        if Keyword.has_key?(chunks, :debug_info), do: :error, else: :missing_debug_info
+
+      _ ->
+        :error
     end
   end
 

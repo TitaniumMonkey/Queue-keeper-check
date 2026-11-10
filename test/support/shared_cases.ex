@@ -562,6 +562,35 @@ defmodule QueueKeeperCheck.SharedCases do
         assert only(run(dead_workers: [window_days: 90]), :dead_workers) == []
       end
 
+      test "dead_workers: old insert with a years-ahead job is inactivity, not unused code" do
+        # History long enough that the check is willing to speak, plus a
+        # completed row so the SQL fallback has a last-insert timestamp.
+        insert(
+          worker: "Demo.Yearly",
+          inserted_at: ago(20 * 86_400),
+          completed_at: ago(20 * 86_400)
+        )
+
+        %{id: pending_id} =
+          insert(
+            state: "scheduled",
+            worker: "Demo.Yearly",
+            inserted_at: ago(20 * 86_400),
+            scheduled_at: DateTime.add(@now, 2 * 365 * 86_400),
+            completed_at: nil,
+            attempted_at: nil
+          )
+
+        report = run(dead_workers: [window_days: 14])
+        [finding] = Enum.filter(only(report, :dead_workers), &(&1.worker == "Demo.Yearly"))
+        assert finding.severity == :warning
+        assert finding.count >= 1
+        assert pending_id in finding.job_ids
+        assert finding.message =~ "still pending"
+        assert finding.message =~ "not evidence of unused code"
+        refute finding.message =~ "dead code"
+      end
+
       test "dead_workers: will not claim a worker is dead when history is shorter than the window" do
         # An old in-flight job would look dead if we ignored retention: the recent
         # completed row of the same worker can be pruned, leaving only the old one.
