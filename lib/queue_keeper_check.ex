@@ -5,7 +5,7 @@ defmodule QueueKeeperCheck do
       report = QueueKeeperCheck.run(MyApp.Repo)
       IO.puts(QueueKeeperCheck.format(report))
 
-  Detects nine conditions (see `checks/0` and `QueueKeeperCheck.Config` for thresholds):
+  Detects ten conditions (see `checks/0` and `QueueKeeperCheck.Config` for thresholds):
 
   * `:orphaned` - jobs `executing` far longer than any job should run (execution age only;
     possibly orphaned by a node crash)
@@ -20,12 +20,21 @@ defmodule QueueKeeperCheck do
   * `:cron_missing` - an expected (cron) worker has had no job inserted for too long; opt-in
     via `cron_missing: [expected: %{"MyApp.Nightly" => 90_000}]`
   * `:dead_workers` - a worker has had no job inserted within a window of any positive
-    integer number of days (possible dead code). Opt-in via `dead_workers: [window_days: 14]`
-    (7, 14 and 30 are examples, not a limit). Always a warning. Uses last enqueue
-    (`inserted_at`). When the opt-in last-seen ledger is attached, that is the source of
-    truth and the check stays silent until the ledger has been recording for the window
-    (no need to raise the Pruner `max_age`). Otherwise it falls back to `oban_jobs` and
-    will not flag workers when finished-job history is shorter than the window
+    integer number of days (enqueue inactivity, not proof of unused code). Opt-in via
+    `dead_workers: [window_days: 14]` (7, 14 and 30 are examples, not a limit). Always a
+    warning. Uses last enqueue (`inserted_at`) and reports leftover nonterminal or
+    future-scheduled jobs. When the opt-in last-seen ledger is attached, that is the
+    source of truth and the check stays silent until the ledger has been recording for
+    the window (no need to raise the Pruner `max_age`). Otherwise it falls back to
+    `oban_jobs` and will not flag workers when finished-job history is shorter than the
+    window
+  * `:persisted_jobs` - opt-in, report-only reconciliation of nonterminal jobs
+    (including future `scheduled` and core `suspended`) against a trusted inventory of
+    deployed workers and effective queues. Classifies missing workers, unconfigured
+    queues, paused queues, no active consumer (only with a supplied consumer snapshot),
+    or insufficient evidence. Off until you pass inventory. Never infers
+    deployment-wide absence from one node. Oban Pro beyond core `suspended` is
+    untested and unverified
 
   Options: any check name with a keyword list of thresholds, plus
 
@@ -52,7 +61,8 @@ defmodule QueueKeeperCheck do
     :discarded,
     :cancelled,
     :cron_missing,
-    :dead_workers
+    :dead_workers,
+    :persisted_jobs
   ]
 
   @doc "All check names, in the order they run."
@@ -158,7 +168,11 @@ defmodule QueueKeeperCheck do
     lines =
       Enum.map(r.findings, fn f ->
         scope =
-          [f.queue && "queue=#{f.queue}", f.worker && "worker=#{f.worker}"]
+          [
+            f.queue && "queue=#{f.queue}",
+            f.worker && "worker=#{f.worker}",
+            f.reason && "reason=#{f.reason}"
+          ]
           |> Enum.reject(&is_nil/1)
           |> Enum.join(" ")
 

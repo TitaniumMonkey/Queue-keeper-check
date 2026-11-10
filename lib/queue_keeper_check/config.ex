@@ -29,6 +29,14 @@ defmodule QueueKeeperCheck.Config do
   | `:dead_workers` | `discover` | `false` | also check `Oban.Worker` modules in loaded non-OTP applications (needs the host app started; `mix queue_keeper.check` and `Release` do not start it) |
   | `:dead_workers` | `report_short_history` | `false` | if the window is longer than the ledger's recording age (or, without a ledger, finished-job history), emit a warning instead of staying silent |
   | `:dead_workers` | `use_ledger` | `true` | when the opt-in ledger tables exist and recording has started, read last-seen times from them (cheap) instead of scanning `oban_jobs`. The check itself still only SELECTs; writing to the ledger is a separate, explicit `QueueKeeperCheck.Ledger.attach/1` |
+  | `:persisted_jobs` | `workers` | `[]` | deployed worker name strings (the trusted inventory). Compared as strings; never turned into atoms |
+  | `:persisted_jobs` | `previous_workers` | `[]` | extra worker names still considered deployed (rolling rename / rollout). Unioned with `workers` |
+  | `:persisted_jobs` | `queues` | `[]` | effective queue name strings for this Oban prefix |
+  | `:persisted_jobs` | `paused_queues` | `[]` | operator-supplied list of queues known to be paused. The check does not read pause state from the cluster |
+  | `:persisted_jobs` | `dynamic_queues` | `:unknown` | `:unknown` (default): queues not in `queues` are `:insufficient_evidence`, never unconfigured. `:enumerated`: the `queues` list is complete, so others are `:unconfigured_queue` |
+  | `:persisted_jobs` | `consumers` | `:unknown` | `:unknown` (default): never emit `:no_active_consumer` (one node cannot prove a deployment-wide gap). A list of queue name strings is a cluster-wide snapshot you supply; queues with leftover jobs not in that list may be `:no_active_consumer` |
+  | `:persisted_jobs` | `discover` | `false` | union `Oban.Worker` modules in loaded non-OTP apps into the worker inventory (needs the host app started; `mix queue_keeper.check` and `Release` do not start it). If `discover` is the only worker source and it finds nothing, the check reports `:insufficient_evidence` instead of treating every job worker as missing |
+  | `:persisted_jobs` | `ignore_workers` / `ignore_queues` | `[]` | names to skip |
 
   `:retry_storm` counts, per worker, within the window:
 
@@ -60,6 +68,15 @@ defmodule QueueKeeperCheck.Config do
   that worker is not flagged. Workers listed in `cron_missing.expected` are
   skipped so the two checks do not double-report.
 
+  `:persisted_jobs` is off until you pass a worker inventory (`workers`,
+  `previous_workers`, or `discover: true`), a queue inventory (`queues` or
+  `paused_queues`), or a `consumers` snapshot. It is report-only: bounded
+  `SELECT`s of nonterminal rows (`available`, `scheduled` including future,
+  `retryable`, `executing`, and core `suspended`). One `run/2` covers one
+  prefix; run once per Oban instance. Worker and queue names from the
+  database stay strings. Oban Pro-specific states or archive tables are
+  not queried; Pro support beyond core `suspended` is untested and unverified.
+
   Safety options (top level, not per check):
 
   | option | default | meaning |
@@ -90,6 +107,17 @@ defmodule QueueKeeperCheck.Config do
       discover: false,
       report_short_history: false,
       use_ledger: true
+    ],
+    persisted_jobs: [
+      workers: [],
+      previous_workers: [],
+      queues: [],
+      paused_queues: [],
+      dynamic_queues: :unknown,
+      consumers: :unknown,
+      discover: false,
+      ignore_workers: [],
+      ignore_queues: []
     ]
   ]
 
@@ -252,6 +280,43 @@ defmodule QueueKeeperCheck.Config do
        when key in [:include_completed, :discover, :report_short_history, :use_ledger] do
     unless is_boolean(v),
       do: raise(ArgumentError, "#{inspect(key)} must be a boolean, got: #{inspect(v)}")
+  end
+
+  defp validate!(_check, key, list)
+       when key in [
+              :workers,
+              :previous_workers,
+              :queues,
+              :paused_queues,
+              :ignore_workers,
+              :ignore_queues
+            ] do
+    unless is_list(list) and Enum.all?(list, &is_binary/1),
+      do:
+        raise(
+          ArgumentError,
+          "#{inspect(key)} must be a list of name strings, got: #{inspect(list)}"
+        )
+  end
+
+  defp validate!(:persisted_jobs, :dynamic_queues, v) when v in [:unknown, :enumerated], do: :ok
+
+  defp validate!(:persisted_jobs, :dynamic_queues, v),
+    do:
+      raise(
+        ArgumentError,
+        "persisted_jobs :dynamic_queues must be :unknown or :enumerated, got: #{inspect(v)}"
+      )
+
+  defp validate!(:persisted_jobs, :consumers, :unknown), do: :ok
+
+  defp validate!(:persisted_jobs, :consumers, list) do
+    unless is_list(list) and Enum.all?(list, &is_binary/1),
+      do:
+        raise(
+          ArgumentError,
+          "persisted_jobs :consumers must be :unknown or a list of queue name strings, got: #{inspect(list)}"
+        )
   end
 
   defp validate!(check, key, v)

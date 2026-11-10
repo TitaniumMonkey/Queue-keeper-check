@@ -8,6 +8,9 @@ defmodule QueueKeeperCheck.Finding do
   * `:count` - number of jobs involved
   * `:value` / `:threshold` - the measured value and the limit it crossed
   * `:message` - one human-readable line
+  * `:reason` - optional machine-readable kind (used by `:persisted_jobs`:
+    `:missing_worker`, `:unconfigured_queue`, `:paused_queue`,
+    `:no_active_consumer`, `:insufficient_evidence`). `nil` for other checks
   * `:job_ids` - up to 10 sample job ids for follow-up
   """
   @derive Jason.Encoder
@@ -20,6 +23,7 @@ defmodule QueueKeeperCheck.Finding do
     :value,
     :threshold,
     :message,
+    :reason,
     job_ids: []
   ]
 
@@ -32,6 +36,7 @@ defmodule QueueKeeperCheck.Finding do
           value: number() | nil,
           threshold: number() | nil,
           message: String.t(),
+          reason: atom() | nil,
           job_ids: [integer()]
         }
 end

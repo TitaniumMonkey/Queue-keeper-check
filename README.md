@@ -3,7 +3,7 @@
 [![CI](https://github.com/TitaniumMonkey/Queue-keeper-check/actions/workflows/ci.yml/badge.svg)](https://github.com/TitaniumMonkey/Queue-keeper-check/actions/workflows/ci.yml)
 
 Read-only health check for [Oban](https://github.com/oban-bg/oban) queues. It runs aggregate
-queries on `oban_jobs` and reports nine conditions with thresholds:
+queries on `oban_jobs` and reports ten conditions with thresholds:
 
 | Check | Fires when | Default threshold | Severity |
 |---|---|---|---|
@@ -16,6 +16,7 @@ queries on `oban_jobs` and reports nine conditions with thresholds:
 | `:cancelled` | cancelled-job spike for a worker | 10 / 3600 s | warning, critical at 2x |
 | `:cron_missing` | an expected (usually cron) worker has had no job inserted for too long | off until you list workers | always critical |
 | `:dead_workers` | a worker has had no job inserted within a window of any positive integer number of days (enqueue inactivity, not proof of unused code). Uses last enqueue and reports leftover nonterminal/future jobs. Prefers the opt-in last-seen ledger when attached; otherwise reads `oban_jobs` and stays silent when history is shorter than the window | off until you set `window_days` (7, 14 and 30 are examples; 14 is the default if you only set `known` or `discover: true`) | always warning |
+| `:persisted_jobs` | nonterminal jobs (including future-scheduled and core `suspended`) whose worker or queue is missing from a trusted inventory you supply. Reasons: missing worker, unconfigured queue, paused queue, no active consumer (only with a consumer snapshot), or insufficient evidence. Never infers a cluster-wide gap from one node | off until you pass `workers`, `queues`, `paused_queues`, `discover: true`, or a `consumers` snapshot | always warning |
 
 "Due" means `available`, or `scheduled`/`retryable` whose `scheduled_at` has passed. Job `args`,
 `meta` and `errors` are never read. Nothing is sent anywhere; you decide where the report goes.
@@ -30,9 +31,11 @@ queries on `oban_jobs` and reports nine conditions with thresholds:
   until you run its migration and `attach/1`, and it only writes to
   `queue_keeper_worker_sightings` / `queue_keeper_ledger_meta`, never to `oban_jobs`.
 * All queries use Oban's standard indexes except the opt-in `:cron_missing` check and the
-  `:dead_workers` fallback that scans `oban_jobs` when no ledger is present. On a 10M-row
-  table a full run without those two takes about 2 s. With the ledger, `:dead_workers` is
-  an O(workers) read.
+  `:dead_workers` fallback that scans `oban_jobs` when no ledger is present. The opt-in
+  `:persisted_jobs` query is filtered on `state IN (...)` and can use Oban's
+  state-prefixed indexes. On a 10M-row table a full run without the seq-scan checks
+  takes about 2 s. With the ledger, `:dead_workers` is an O(workers) read plus a
+  bounded pending-job query.
 * `mix queue_keeper.check` and `QueueKeeperCheck.Release` start only your repo, never your
   application or Oban.
 * Database errors never raise. A check that cannot complete is reported, and the exit
@@ -262,6 +265,40 @@ A worker enqueued only through dynamic dispatch (`Module.concat`, `apply/3` on a
 string, a name from the database) will appear here even if production still runs it.
 Runtime-only Pro cron rules stored in the database are not visible; list those in
 `--ignore`. Missing BEAM debug info makes the scan incomplete.
+
+**Status atom migration.** `scan/1` now returns `status: :review_candidate` (not
+`:dead`). Prefer `review_candidates/1`; `dead_workers/1` is a compatibility alias.
+`--json` includes `review_candidates` and a deprecated `dead` key for the same list.
+
+### Persisted-job reconciliation
+
+`:persisted_jobs` is an opt-in, report-only check. It compares leftover
+nonterminal jobs — including jobs scheduled years ahead, and the core
+`suspended` state — to a trusted inventory you pass in:
+
+```elixir
+QueueKeeperCheck.run(MyApp.Repo,
+  persisted_jobs: [
+    workers: ["MyApp.Mailer", "MyApp.Billing"],
+    previous_workers: ["MyApp.OldMailer"],  # rolling rename
+    queues: ["default", "mail", "events"],
+    paused_queues: ["mail"],
+    dynamic_queues: :enumerated,            # or :unknown (default)
+    consumers: ["default", "events"]        # optional cluster-wide snapshot
+  ]
+)
+```
+
+Findings are always `:warning` and set `Finding.reason` to `:missing_worker`,
+`:unconfigured_queue`, `:paused_queue`, `:no_active_consumer`, or
+`:insufficient_evidence`. `dynamic_queues: :unknown` (the default) never calls a
+queue unconfigured; `:no_active_consumer` is emitted only when you supply a
+`consumers` snapshot. One `run/2` covers one Oban prefix; run once per instance.
+Worker and queue names from the database are kept as strings and are never
+turned into atoms. Pause and consumer state come only from these options, not
+from the Oban process on this node (`Release` and `mix queue_keeper.check` start
+only the repo). Oban Pro behaviour beyond core `suspended` is untested and
+unverified; this project does not have a Pro license.
 
 ## When Oban itself is down
 

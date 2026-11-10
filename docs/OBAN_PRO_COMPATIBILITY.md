@@ -21,8 +21,12 @@ below.
   Pro adds its own tables (`oban_producers`, and in v1.8 `oban_pruners` and
   `oban_jobs_archive`), which queue_keeper_check does not read.
 * Pro v1.7+ requires Oban 2.21+ and its v14 migration, which adds the `suspended` state
-  (used for workflows and chains waiting on dependencies). queue_keeper_check ignores
-  `suspended` jobs, which is the right thing: they are not due.
+  (used for workflows and chains waiting on dependencies). `:backlog` and `:stalled`
+  still ignore `suspended` jobs, which is right for "not due". `:dead_workers` (pending
+  leftovers) and the opt-in `:persisted_jobs` check include `suspended` as nonterminal
+  work so leftover held jobs are visible. That inclusion uses the **core** Oban
+  `suspended` state; Pro workflow behaviour has not been verified on a licensed Pro
+  system.
 * All queries are plain `SELECT`s on `oban_jobs`, so the read-only and least-privilege
   guarantees in [SECURITY_REVIEW.md](SECURITY_REVIEW.md) do not depend on the engine.
 * Pro v1.7 replaced several of Pro's own indexes and v1.8 dropped the old ones. The docs
@@ -35,14 +39,14 @@ below.
 
 | Pro feature | Effect on queue_keeper_check |
 |---|---|
-| **Global limits and rate limits** (`global_limit`, `rate_limit` per queue) | Jobs deliberately held back by a limit stay `available` and age. `:backlog` can fire even though Pro is doing exactly what you configured, and `:stalled` can fire if the limit lets nothing start within the 60 s activity window (e.g. a slow rate limit). Raise `backlog` thresholds or exclude those queues. |
+| **Global limits and rate limits** (`global_limit`, `rate_limit` per queue) | Jobs deliberately held back by a limit stay `available` and age. `:backlog` can fire even though Pro is doing exactly what you configured, and `:stalled` can fire if the limit lets nothing start within the 60 s activity window (e.g. a slow rate limit). Raise `backlog` thresholds or exclude those queues. `:persisted_jobs` does **not** treat a rate-limited but configured, unpaused queue as unconfigured or paused. |
 | **Pro Pruner** (`Oban.Pro.Pruner`, formerly `Oban.Pro.Plugins.DynamicPruner`) | Its default rule keeps only the **1,000 most recent** `completed`, `cancelled` or `discarded` jobs (by count, not age), and rules can differ per queue, worker or state. On a busy system that can be minutes of history, so `:discarded` and `:cancelled` spikes, `:retry_storm` with `include_completed: true` and `:stalled`'s look-back see less than their windows, and `:cron_missing` can report a worker whose last run was pruned. `:dead_workers` without a ledger stays silent when visible finished-job history is shorter than `window_days`. With the opt-in last-seen ledger attached, `:dead_workers` does not depend on Pro retention; you do not need to change pruner rules for that check. Engine insert telemetry is documented the same as core Oban but has not been verified on a running Pro system. For other history-based checks, configure an age-based rule that covers your windows, or shrink the windows. |
 | **Archiving** (Pruner rules with `archive: true`) | Archived jobs move to `oban_jobs_archive`, which queue_keeper_check does not read. They count as pruned. The ledger, if attached, still records inserts before jobs are archived. |
 | **Pro Lifeline** (`Oban.Pro.Lifeline`, formerly `DynamicLifeline`) | Rescues orphans using producer records rather than a fixed `rescue_after` age, so real orphans are usually rescued long before `:orphaned`'s 3600 s limit. Under Pro, `:orphaned` findings are more likely to be jobs that are genuinely still running. Lifeline also *discards* rescued jobs whose attempts are exhausted (unless `retry_exhausted` is set), which shows up in `:discarded`. |
 | **DynamicPartitioner** (deprecated in Pro v1.8.1) | Replaces `oban_jobs` with a table partitioned by state (finished states sub-partitioned by date, kept 3 days by default) under the same name; the original is renamed `oban_jobs_old`. Queries should still run, but index shapes on the partitions were not verified, so query cost is unknown. Pro's documented way off partitioning runs a second Oban instance in another prefix, so during that transition run the checker once per prefix (`prefix:`). |
 | **Snoozing** | Pro's engine records snooze information in `meta`. We did not verify whether Pro's snooze changes `attempt` the way Oban core's does (core rolls the attempt back), so a snoozing worker could inflate `:retry_storm` (which counts attempt >= 2 for some states). |
 | **Async tracking** | Pro bundles job acknowledgements and records outcomes with a short lag (documented as up to about 5 ms). Negligible at whole-second resolution. |
-| **Workflows, chains, batches** | Jobs waiting on dependencies are held in `suspended` (Pro v1.7+), ignored by the checker. How older Pro versions held such jobs was not checked. |
+| **Workflows, chains, batches** | Jobs waiting on dependencies are held in `suspended` (Pro v1.7+). Due-job checks ignore them; `:persisted_jobs` and `:dead_workers` leftover reporting include the core `suspended` state. Pro workflow semantics are untested (no license). How older Pro versions held such jobs was not checked. |
 | **Multiple Oban instances / prefixes** | As with core Oban, one run checks one prefix. |
 
 ## Sources

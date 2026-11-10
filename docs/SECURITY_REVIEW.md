@@ -19,7 +19,7 @@ and output sanitisation.
 
 On a 10-million-row `oban_jobs` table with only Oban's standard indexes, a full run took
 **about 12 minutes on v0.1.0** and **2.2 s warm / 6.0 s with the OS page cache dropped on
-`main`** (section 8). The opt-in `:cron_missing` check still needs a sequential scan, as does `:dead_workers` when no last-seen ledger is present.
+`main`** (section 8). The opt-in `:cron_missing` check still needs a sequential scan, as does `:dead_workers` when no last-seen ledger is present. The opt-in `:persisted_jobs` query is filtered on `state IN (...)` and can use Oban's state-prefixed indexes.
 
 | ID | Severity | Finding | Status |
 |---|---|---|---|
@@ -130,6 +130,15 @@ SELECT worker, queue, count(id) FROM oban_jobs WHERE state = $n AND discarded_at
 SELECT worker, queue, count(id) FROM oban_jobs WHERE state = $n AND cancelled_at >= $n GROUP BY worker, queue
 -- cron_missing (opt-in)
 SELECT worker, max(inserted_at), max(id) FROM oban_jobs WHERE worker = ANY($n) GROUP BY worker
+-- dead_workers fallback (opt-in, no ledger): sequential scan, no worker/inserted_at index
+SELECT min(inserted_at) FROM oban_jobs WHERE state IN ('completed','cancelled','discarded')
+SELECT worker, max(inserted_at), max(id), count(id) FROM oban_jobs GROUP BY worker
+-- dead_workers pending leftovers + persisted_jobs (opt-in): state-prefixed, includes future scheduled and suspended
+SELECT worker, count(id), min(scheduled_at), max(id) FROM oban_jobs
+  WHERE state IN ('available','scheduled','retryable','executing','suspended') GROUP BY worker
+SELECT queue, worker, state, count(id), min(scheduled_at), max(id) FROM oban_jobs
+  WHERE state IN ('available','scheduled','retryable','executing','suspended')
+  GROUP BY queue, worker, state
 -- samples: the finding's own WHERE clause plus queue/worker equality, `SELECT id ... LIMIT 10`
 -- (no ORDER BY), at most 100 sample queries per run
 ```

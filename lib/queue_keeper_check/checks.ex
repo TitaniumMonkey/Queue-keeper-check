@@ -8,7 +8,9 @@ defmodule QueueKeeperCheck.Checks do
   `worker`, `attempt` and timestamp columns from `oban_jobs`. `args`, `meta`, `errors`, `tags` and
   `attempted_by` are never selected or filtered on. When the opt-in ledger is present,
   `:dead_workers` SELECTs from `queue_keeper_worker_sightings` and
-  `queue_keeper_ledger_meta` instead of scanning `oban_jobs`. Each query is either an aggregate
+  `queue_keeper_ledger_meta` instead of scanning `oban_jobs`. The opt-in
+  `:persisted_jobs` check also SELECTs nonterminal `oban_jobs` rows (state-prefixed).
+  Each query is either an aggregate
   (one row per queue or worker) or capped with `LIMIT`, and each is shaped to use Oban's
   standard indexes (`state, queue, priority, scheduled_at, id`; `state, discarded_at`;
   `state, cancelled_at`; the primary key). See `docs/SECURITY_REVIEW.md` for the exact SQL
@@ -20,6 +22,12 @@ defmodule QueueKeeperCheck.Checks do
 
   @sample 10
   @sample_queries 100
+
+  # Nonterminal Oban states (core Job.unique_states(:incomplete), including
+  # `:suspended` which exists in Oban >= 2.21 / migrations v14). Bounded by
+  # the leading `state` column of Oban's standard indexes; not a full-table
+  # GROUP BY the way the enqueue-activity fallback is.
+  @incomplete_job_states ~w(available scheduled retryable executing suspended)
 
   # -- executing jobs: orphaned and hanging -----------------------------------------------
   # Aggregated in SQL so the result stays one row per (queue, worker), however many rows
@@ -559,6 +567,294 @@ defmodule QueueKeeperCheck.Checks do
     {:jobs, history_secs, latest}
   end
 
+  # -- persisted jobs (opt-in inventory reconciliation) -----------------------------------
+  # Report-only. Compares nonterminal jobs, including future scheduled and core
+  # `suspended`, to an operator-supplied inventory. One run is one prefix; never
+  # infer deployment-wide absence from this node; never create atoms from DB
+  # worker or queue strings. Oban Pro beyond core `suspended` is untested.
+
+  def persisted_jobs(repo, cfg, now, qopts) do
+    pj = cfg[:persisted_jobs]
+
+    if persisted_jobs_enabled?(pj) do
+      persisted_jobs_run(repo, cfg, now, qopts, pj)
+    else
+      []
+    end
+  end
+
+  defp persisted_jobs_enabled?(pj) do
+    pj[:workers] != [] or pj[:previous_workers] != [] or pj[:queues] != [] or
+      pj[:paused_queues] != [] or pj[:discover] or pj[:consumers] != :unknown
+  end
+
+  defp persisted_jobs_run(repo, _cfg, now, qopts, pj) do
+    ignore_workers = MapSet.new(pj[:ignore_workers])
+    ignore_queues = MapSet.new(pj[:ignore_queues])
+    paused = MapSet.new(pj[:paused_queues])
+    queues = MapSet.new(pj[:queues])
+    previous = MapSet.new(pj[:previous_workers])
+    explicit = MapSet.union(MapSet.new(pj[:workers]), previous)
+
+    discovered = if pj[:discover], do: discovered_workers(), else: []
+    workers = Enum.reduce(discovered, explicit, &MapSet.put(&2, &1))
+    worker_inventory? = MapSet.size(explicit) > 0 or discovered != []
+
+    rows = nonterminal_groups(repo, qopts)
+
+    by_worker = group_pending(rows, fn {_q, w, _s, n, at, id} -> {w, n, at, id} end)
+    by_queue = group_pending(rows, fn {q, _w, _s, n, at, id} -> {q, n, at, id} end)
+
+    findings = []
+
+    findings =
+      findings ++
+        worker_findings(
+          repo,
+          qopts,
+          now,
+          by_worker,
+          workers,
+          worker_inventory?,
+          pj,
+          ignore_workers
+        )
+
+    findings =
+      findings ++
+        queue_findings(
+          repo,
+          qopts,
+          now,
+          by_queue,
+          queues,
+          paused,
+          pj,
+          ignore_queues
+        )
+
+    findings
+  end
+
+  defp nonterminal_groups(repo, qopts) do
+    from(j in Job,
+      where: j.state in @incomplete_job_states,
+      group_by: [j.queue, j.worker, j.state],
+      select:
+        {j.queue, j.worker, j.state, count(j.id), type(min(j.scheduled_at), :utc_datetime_usec),
+         max(j.id)}
+    )
+    |> repo.all(qopts)
+  end
+
+  defp group_pending(rows, fun) do
+    Enum.reduce(rows, %{}, fn row, acc ->
+      {key, n, at, id} = fun.(row)
+
+      Map.update(acc, key, {n, at, [id]}, fn {n0, at0, ids} ->
+        {n0 + n, earlier_dt(at0, at), [id | ids]}
+      end)
+    end)
+  end
+
+  defp earlier_dt(nil, other), do: other
+  defp earlier_dt(other, nil), do: other
+
+  defp earlier_dt(a, b) do
+    if DateTime.compare(a, b) == :gt, do: b, else: a
+  end
+
+  defp worker_findings(repo, qopts, now, by_worker, workers, worker_inventory?, pj, ignore) do
+    cond do
+      pj[:discover] and not worker_inventory? ->
+        [
+          %Finding{
+            check: :persisted_jobs,
+            severity: :warning,
+            reason: :insufficient_evidence,
+            count: 0,
+            message:
+              "persisted_jobs discover: true found no Oban.Worker modules. " <>
+                "The host app is probably not started (mix queue_keeper.check and " <>
+                "Release start only the repo). Cannot classify missing workers from " <>
+                "this node; pass an explicit workers list, or run from a node that " <>
+                "has loaded the application."
+          }
+        ]
+
+      not worker_inventory? ->
+        []
+
+      true ->
+        for {worker, {n, next_at, ids}} <- Enum.sort(by_worker),
+            not MapSet.member?(ignore, worker),
+            not MapSet.member?(workers, worker) do
+          %Finding{
+            check: :persisted_jobs,
+            severity: :warning,
+            reason: :missing_worker,
+            worker: worker,
+            count: n,
+            value: n,
+            job_ids: sample_or_ids(repo, qopts, worker, nil, ids),
+            message:
+              "#{worker} has #{n} nonterminal job(s) (available, scheduled, retryable, " <>
+                "executing, or suspended), including future-scheduled work, but is not " <>
+                "in the deployed worker inventory" <>
+                next_sched_suffix(next_at, now) <>
+                ". The worker module may have been removed or renamed; during a " <>
+                "rollout add the old name to previous_workers. This does not mean " <>
+                "the job cannot run on another node still serving the old release."
+          }
+        end
+    end
+  end
+
+  defp queue_findings(repo, qopts, now, by_queue, queues, paused, pj, ignore) do
+    enumerated? = pj[:dynamic_queues] == :enumerated
+    queue_list? = MapSet.size(queues) > 0 or enumerated?
+    consumers = pj[:consumers]
+
+    Enum.flat_map(Enum.sort(by_queue), fn {queue, {n, next_at, ids}} ->
+      if MapSet.member?(ignore, queue) do
+        []
+      else
+        paused? = MapSet.member?(paused, queue)
+        listed? = MapSet.member?(queues, queue)
+        suffix = next_sched_suffix(next_at, now)
+        ids = sample_or_ids(repo, qopts, nil, queue, ids)
+
+        paused_finding =
+          if paused? do
+            [
+              %Finding{
+                check: :persisted_jobs,
+                severity: :warning,
+                reason: :paused_queue,
+                queue: queue,
+                count: n,
+                value: n,
+                job_ids: ids,
+                message:
+                  "Queue #{queue} has #{n} nonterminal job(s) and is listed in " <>
+                    "paused_queues" <>
+                    suffix <>
+                    ". Jobs will not execute until the queue is resumed. Pause " <>
+                    "state is taken only from the options you passed, not from " <>
+                    "this node's Oban process."
+              }
+            ]
+          else
+            []
+          end
+
+        unconfigured =
+          cond do
+            listed? ->
+              []
+
+            enumerated? and not listed? ->
+              [
+                %Finding{
+                  check: :persisted_jobs,
+                  severity: :warning,
+                  reason: :unconfigured_queue,
+                  queue: queue,
+                  count: n,
+                  value: n,
+                  job_ids: ids,
+                  message:
+                    "Queue #{queue} has #{n} nonterminal job(s) but is not in the " <>
+                      "effective queue inventory (dynamic_queues: :enumerated)" <>
+                      suffix <>
+                      ". The consumer config may have been removed. This is not " <>
+                      "proof that no node still consumes the queue."
+                }
+              ]
+
+            queue_list? and not listed? ->
+              [
+                %Finding{
+                  check: :persisted_jobs,
+                  severity: :warning,
+                  reason: :insufficient_evidence,
+                  queue: queue,
+                  count: n,
+                  value: n,
+                  job_ids: ids,
+                  message:
+                    "Queue #{queue} has #{n} nonterminal job(s) and is not in the " <>
+                      "queues list, but dynamic_queues is :unknown, so this may be a " <>
+                      "dynamic queue rather than an unconfigured one" <>
+                      suffix <>
+                      ". Set dynamic_queues: :enumerated if the list is complete."
+                }
+              ]
+
+            true ->
+              []
+          end
+
+        no_consumer =
+          cond do
+            consumers == :unknown ->
+              []
+
+            is_list(consumers) and queue in consumers ->
+              []
+
+            is_list(consumers) ->
+              [
+                %Finding{
+                  check: :persisted_jobs,
+                  severity: :warning,
+                  reason: :no_active_consumer,
+                  queue: queue,
+                  count: n,
+                  value: n,
+                  job_ids: ids,
+                  message:
+                    "Queue #{queue} has #{n} nonterminal job(s) and is not in the " <>
+                      "supplied consumers snapshot" <>
+                      suffix <>
+                      ". The snapshot is taken as cluster-wide; this check never " <>
+                      "infers a missing consumer from a single node."
+                }
+              ]
+
+            true ->
+              []
+          end
+
+        paused_finding ++ unconfigured ++ no_consumer
+      end
+    end)
+  end
+
+  defp next_sched_suffix(nil, _now), do: ""
+
+  defp next_sched_suffix(at, now) do
+    rel = DateTime.diff(at, now)
+
+    if rel > 0 do
+      "; next scheduled_at is #{rel}s from now"
+    else
+      "; oldest scheduled_at is #{-rel}s ago"
+    end
+  end
+
+  defp sample_or_ids(repo, qopts, worker, queue, ids) do
+    query =
+      from(j in Job, where: j.state in @incomplete_job_states)
+      |> then(fn q -> if worker, do: where(q, [j], j.worker == ^worker), else: q end)
+      |> then(fn q -> if queue, do: where(q, [j], j.queue == ^queue), else: q end)
+
+    case sample_ids(repo, query, qopts) do
+      [] -> ids |> Enum.reject(&is_nil/1) |> Enum.uniq() |> Enum.sort() |> Enum.take(10)
+      sampled -> sampled
+    end
+  end
+
   defp qopts_to_opts(qopts), do: Keyword.take(qopts, [:prefix])
 
   defp short_history_message(:ledger, days, threshold, history_secs) do
@@ -578,12 +874,6 @@ defmodule QueueKeeperCheck.Checks do
       "inactivity without false positives. Attach QueueKeeperCheck.Ledger so this " <>
       "check does not depend on Pruner retention, or shrink window_days."
   end
-
-  # Nonterminal Oban states (core Job.unique_states(:incomplete), including
-  # `:suspended` which exists in Oban >= 2.21 / migrations v14). Bounded by
-  # the leading `state` column of Oban's standard indexes; not a full-table
-  # GROUP BY the way the enqueue-activity fallback is.
-  @incomplete_job_states ~w(available scheduled retryable executing suspended)
 
   defp pending_by_worker(repo, qopts) do
     # Rescued: a failed pending SELECT must not drop the inactivity findings

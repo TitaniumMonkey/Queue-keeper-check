@@ -814,13 +814,42 @@ defmodule QueueKeeperCheck.SharedCases do
             completed_at: ago(20 * 86_400)
           })
         )
+
+        # Future-scheduled leftover so :persisted_jobs fires under @all_opts
+        # without affecting due-job checks (backlog/stalled).
+        insert(
+          Map.merge(ex, %{
+            state: "scheduled",
+            worker: "Demo.Removed",
+            queue: "default",
+            inserted_at: ago(20 * 86_400),
+            scheduled_at: DateTime.add(@now, 2 * 365 * 86_400),
+            attempted_at: nil
+          })
+        )
       end
 
       @all_opts [
         hanging: [default_budget: 300, budgets: %{"Demo.Video" => 600}],
         retry_storm: [min_retries: 3, include_completed: true],
         cron_missing: [expected: %{"Demo.Hourly" => 3_900, "Demo.Never" => 60}],
-        dead_workers: [window_days: 14]
+        dead_workers: [window_days: 14],
+        persisted_jobs: [
+          workers: [
+            "Demo.Worker",
+            "Demo.Orphan",
+            "Demo.Video",
+            "Demo.Email",
+            "Demo.Flaky",
+            "Demo.Sync",
+            "Demo.Hook",
+            "Demo.Hourly",
+            "Demo.Ancient",
+            "Demo.Dead"
+          ],
+          queues: ["default", "ghost"],
+          dynamic_queues: :enumerated
+        ]
       ]
 
       defp capture_sql(fun) do
@@ -945,6 +974,272 @@ defmodule QueueKeeperCheck.SharedCases do
         assert slack =~ "&lt;!channel&gt;"
       end
 
+      test "persisted_jobs: off by default even with leftover nonterminal jobs" do
+        insert(
+          state: "scheduled",
+          worker: "Demo.Removed",
+          inserted_at: ago(20 * 86_400),
+          scheduled_at: DateTime.add(@now, 2 * 365 * 86_400),
+          completed_at: nil,
+          attempted_at: nil
+        )
+
+        assert only(run(), :persisted_jobs) == []
+      end
+
+      test "persisted_jobs: missing worker, including years-ahead scheduled jobs" do
+        %{id: id} =
+          insert(
+            state: "scheduled",
+            worker: "Demo.Removed",
+            inserted_at: ago(20 * 86_400),
+            scheduled_at: DateTime.add(@now, 2 * 365 * 86_400),
+            completed_at: nil,
+            attempted_at: nil
+          )
+
+        insert(
+          state: "available",
+          worker: "Demo.Live",
+          scheduled_at: ago(5),
+          completed_at: nil,
+          attempted_at: nil
+        )
+
+        report =
+          run(
+            persisted_jobs: [
+              workers: ["Demo.Live", "Demo.Worker"],
+              queues: ["default"],
+              dynamic_queues: :enumerated
+            ]
+          )
+
+        [finding] = only(report, :persisted_jobs)
+        assert finding.reason == :missing_worker
+        assert finding.severity == :warning
+        assert finding.worker == "Demo.Removed"
+        assert finding.count >= 1
+        assert id in finding.job_ids
+        assert finding.message =~ "not in the deployed worker inventory"
+        assert finding.message =~ "from now"
+      end
+
+      test "persisted_jobs: previous_workers covers a rename during rollout" do
+        insert(
+          state: "available",
+          worker: "Demo.OldName",
+          scheduled_at: ago(5),
+          completed_at: nil,
+          attempted_at: nil
+        )
+
+        assert only(
+                 run(
+                   persisted_jobs: [
+                     workers: ["Demo.NewName"],
+                     previous_workers: ["Demo.OldName"]
+                   ]
+                 ),
+                 :persisted_jobs
+               ) == []
+
+        [finding] =
+          only(
+            run(persisted_jobs: [workers: ["Demo.NewName"]]),
+            :persisted_jobs
+          )
+
+        assert finding.reason == :missing_worker
+        assert finding.worker == "Demo.OldName"
+      end
+
+      test "persisted_jobs: unconfigured queue only when dynamic queues are enumerated" do
+        insert(
+          state: "available",
+          worker: "Demo.Live",
+          queue: "abandoned",
+          scheduled_at: ago(5),
+          completed_at: nil,
+          attempted_at: nil
+        )
+
+        unknown =
+          only(
+            run(
+              persisted_jobs: [
+                workers: ["Demo.Live"],
+                queues: ["default"],
+                dynamic_queues: :unknown
+              ]
+            ),
+            :persisted_jobs
+          )
+
+        assert Enum.any?(
+                 unknown,
+                 &(&1.reason == :insufficient_evidence and &1.queue == "abandoned")
+               )
+
+        refute Enum.any?(unknown, &(&1.reason == :unconfigured_queue))
+
+        enumerated =
+          only(
+            run(
+              persisted_jobs: [
+                workers: ["Demo.Live"],
+                queues: ["default"],
+                dynamic_queues: :enumerated
+              ]
+            ),
+            :persisted_jobs
+          )
+
+        assert Enum.any?(
+                 enumerated,
+                 &(&1.reason == :unconfigured_queue and &1.queue == "abandoned")
+               )
+
+        refute Enum.any?(enumerated, &(&1.reason == :insufficient_evidence))
+      end
+
+      test "persisted_jobs: paused queue and rate-limited configured queues" do
+        insert(
+          state: "available",
+          worker: "Demo.Live",
+          queue: "mail",
+          scheduled_at: ago(30),
+          completed_at: nil,
+          attempted_at: nil
+        )
+
+        insert(
+          state: "available",
+          worker: "Demo.Live",
+          queue: "limited",
+          scheduled_at: ago(30),
+          completed_at: nil,
+          attempted_at: nil
+        )
+
+        findings =
+          only(
+            run(
+              persisted_jobs: [
+                workers: ["Demo.Live"],
+                queues: ["mail", "limited"],
+                paused_queues: ["mail"],
+                dynamic_queues: :enumerated
+              ]
+            ),
+            :persisted_jobs
+          )
+
+        assert Enum.any?(findings, &(&1.reason == :paused_queue and &1.queue == "mail"))
+        # A rate-limited but configured, unpaused queue is not unconfigured or paused.
+        refute Enum.any?(findings, &(&1.queue == "limited"))
+      end
+
+      test "persisted_jobs: no_active_consumer only with a supplied snapshot, never from this node alone" do
+        insert(
+          state: "available",
+          worker: "Demo.Live",
+          queue: "lonely",
+          scheduled_at: ago(5),
+          completed_at: nil,
+          attempted_at: nil
+        )
+
+        without =
+          only(
+            run(
+              persisted_jobs: [
+                workers: ["Demo.Live"],
+                queues: ["lonely", "default"],
+                dynamic_queues: :enumerated
+              ]
+            ),
+            :persisted_jobs
+          )
+
+        refute Enum.any?(without, &(&1.reason == :no_active_consumer))
+
+        with_snap =
+          only(
+            run(
+              persisted_jobs: [
+                workers: ["Demo.Live"],
+                queues: ["lonely", "default"],
+                dynamic_queues: :enumerated,
+                consumers: ["default"]
+              ]
+            ),
+            :persisted_jobs
+          )
+
+        assert Enum.any?(
+                 with_snap,
+                 &(&1.reason == :no_active_consumer and &1.queue == "lonely")
+               )
+      end
+
+      test "persisted_jobs: without a worker inventory, leftover jobs are not called missing workers" do
+        insert(
+          state: "available",
+          worker: "Demo.Removed",
+          queue: "default",
+          scheduled_at: ago(5),
+          completed_at: nil,
+          attempted_at: nil
+        )
+
+        findings =
+          only(
+            run(
+              persisted_jobs: [
+                queues: ["default"],
+                dynamic_queues: :enumerated
+              ]
+            ),
+            :persisted_jobs
+          )
+
+        refute Enum.any?(findings, &(&1.reason == :missing_worker))
+      end
+
+      test "persisted_jobs: never creates atoms from database worker or queue strings" do
+        worker = "NoSuch.AtomWorker.#{System.unique_integer([:positive])}"
+        queue = "NoSuch.AtomQueue.#{System.unique_integer([:positive])}"
+
+        insert(
+          state: "available",
+          worker: worker,
+          queue: queue,
+          scheduled_at: ago(5),
+          completed_at: nil,
+          attempted_at: nil
+        )
+
+        findings =
+          only(
+            run(
+              persisted_jobs: [
+                workers: ["Demo.Live"],
+                queues: ["default"],
+                dynamic_queues: :enumerated
+              ]
+            ),
+            :persisted_jobs
+          )
+
+        assert Enum.any?(findings, &(&1.reason == :missing_worker and &1.worker == worker))
+        assert Enum.any?(findings, &(&1.reason == :unconfigured_queue and &1.queue == queue))
+
+        assert_raise ArgumentError, fn -> String.to_existing_atom(worker) end
+        assert_raise ArgumentError, fn -> String.to_existing_atom(queue) end
+        assert_raise ArgumentError, fn -> String.to_existing_atom("Elixir." <> worker) end
+      end
+
       test "config validation rejects bad options before any query" do
         {_, sql} =
           capture_sql(fn ->
@@ -969,7 +1264,11 @@ defmodule QueueKeeperCheck.SharedCases do
                   [dead_workers: [known: [:atom]]],
                   [dead_workers: [overrides: %{"W" => 0}]],
                   [dead_workers: [discover: :yes]],
-                  [dead_workers: [use_ledger: :yes]]
+                  [dead_workers: [use_ledger: :yes]],
+                  [persisted_jobs: [workers: [:atom]]],
+                  [persisted_jobs: [dynamic_queues: :yes]],
+                  [persisted_jobs: [consumers: "default"]],
+                  [persisted_jobs: [discover: :yes]]
                 ] do
               assert_raise ArgumentError, fn -> run(bad) end
             end

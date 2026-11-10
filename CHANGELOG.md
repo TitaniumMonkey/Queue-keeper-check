@@ -6,28 +6,7 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
-### Changed
-
-- `mix queue_keeper.dead_code` / `QueueKeeperCheck.DeadCode`: workers with no static
-  callers are classified as `:review_candidate`, not `:dead`. This is not proof of
-  unused code (dynamic dispatch, future-scheduled jobs, missing debug info). New
-  `scan_report/1` returns coverage (`beams_scanned`, `beams_missing_debug_info`,
-  `complete?`, and related keys). `review_candidates/1` is the preferred helper;
-  `dead_workers/1` remains as an alias. JSON output adds `review_candidates` and
-  `coverage`; the `dead` key is kept as a deprecated alias for the same list.
-  Caller lookup no longer creates atoms from worker-name strings
-  (`String.to_existing_atom` only). Umbrella compile paths use `Mix.Project.apps_paths/0`
-  values instead of assuming `apps/<app>`.
-- `:dead_workers` findings no longer say "this may be dead code". A bounded
-  `state IN (available, scheduled, retryable, executing, suspended)` query surfaces
-  leftover nonterminal and future-scheduled jobs. No recent enqueue with pending
-  work is reported as inactivity, not unused code. Short-history messages now say
-  "insufficient history" rather than "cannot determine dead workers". Do not raise
-  Pruner `max_age` for this check.
-
 ## [0.3.0] - 2026-11-10
-
-Not tagged or published to Hex yet.
 
 ### Added
 
@@ -60,14 +39,39 @@ Not tagged or published to Hex yet.
     explicit (`Migration` + `attach`); `QueueKeeperCheck.run/2` remains read-only.
     Optional one-time `backfill` from current `oban_jobs`.
   * `mix queue_keeper.dead_code`: lists compiled `Oban.Worker` modules with no
-    static call sites and not in Oban/Pro crontab config. Dynamic dispatch is a
-    documented false positive. Needs the project compiled; does not start the app.
-
+    static call sites and not in Oban/Pro crontab config as **review candidates**,
+    not proven dead code. Dynamic dispatch, missing BEAM debug info, and
+    runtime-only cron are documented false positives. `scan_report/1` exposes
+    coverage. Needs the project compiled; does not start the app.
+  * `:persisted_jobs` (opt-in, report-only): bounded read-only comparison of
+    nonterminal jobs (`available`, `scheduled` including future, `retryable`,
+    `executing`, and core `suspended`) against a trusted inventory of deployed
+    workers (`workers`, `previous_workers`, optional `discover`) and effective
+    queues. Findings are always `:warning` and carry a `:reason` of
+    `:missing_worker`, `:unconfigured_queue`, `:paused_queue`,
+    `:no_active_consumer`, or `:insufficient_evidence`. Pause and consumer
+    state are taken only from options you pass; the check never infers
+    deployment-wide absence from one node, and never creates atoms from database
+    worker or queue strings. One `run/2` covers one Oban prefix. Oban Pro
+    support beyond core `suspended` is untested and unverified (no Pro license).
 
 ### Changed
 
-- The documented Hex dependency version is `~> 0.3.0`. Do not publish or tag until
-  this release is reviewed.
+- **Migration (`DeadCode` status atom):** `QueueKeeperCheck.DeadCode.scan/1`
+  now returns `status: :review_candidate` instead of `status: :dead`. Treat this
+  as a breaking change if you matched on `:dead`. `review_candidates/1` is the
+  preferred helper; `dead_workers/1` still returns the same names. JSON from
+  `mix queue_keeper.dead_code --json` adds `review_candidates` and `coverage`
+  and keeps `dead` as a deprecated alias of the same list. Exit codes are
+  unchanged.
+- `:dead_workers` findings no longer say "this may be dead code". A bounded
+  `state IN (...)` query surfaces leftover nonterminal and future-scheduled
+  jobs. No recent enqueue with pending work is reported as inactivity, not
+  unused code. Short-history messages say "insufficient history". Do not raise
+  Pruner `max_age` for this check. Caller lookup in the static scan no longer
+  creates atoms from worker-name strings.
+
+- The documented Hex dependency version is `~> 0.3.0`.
 
 ## [0.2.1] - 2026-10-22
 
