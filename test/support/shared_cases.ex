@@ -849,6 +849,10 @@ defmodule QueueKeeperCheck.SharedCases do
           ],
           queues: ["default", "ghost"],
           dynamic_queues: :enumerated
+        ],
+        dead_worker_candidates: [
+          known: ["Demo.Dead"],
+          scan: [apps: [], callers: %{}, cron: []]
         ]
       ]
 
@@ -1240,6 +1244,389 @@ defmodule QueueKeeperCheck.SharedCases do
         assert_raise ArgumentError, fn -> String.to_existing_atom("Elixir." <> worker) end
       end
 
+      test "dead_worker_candidates: off by default" do
+        insert(
+          worker: "Demo.Abandoned",
+          inserted_at: ago(20 * 86_400),
+          completed_at: ago(20 * 86_400)
+        )
+
+        assert only(run(), :dead_worker_candidates) == []
+      end
+
+      test "dead_worker_candidates: both signals with sufficient history are high confidence" do
+        insert(
+          worker: "Demo.History",
+          inserted_at: ago(20 * 86_400),
+          completed_at: ago(20 * 86_400)
+        )
+
+        insert(
+          worker: "Demo.Abandoned",
+          inserted_at: ago(8 * 86_400),
+          completed_at: ago(8 * 86_400)
+        )
+
+        [finding] =
+          only(
+            run(
+              dead_worker_candidates: [
+                window_days: 7,
+                known: ["Demo.Abandoned"],
+                ignore: ["Demo.History"],
+                scan: [apps: [], callers: %{}, cron: [], complete: true]
+              ]
+            ),
+            :dead_worker_candidates
+          )
+
+        assert finding.reason == :high_confidence
+        assert finding.severity == :warning
+        assert finding.worker == "Demo.Abandoned"
+        assert finding.threshold == 7 * 86_400
+        assert finding.message =~ "Confidence: high"
+        assert finding.message =~ "not proof the worker is dead"
+        refute finding.message =~ "definitely dead"
+      end
+
+      test "dead_worker_candidates: inactivity alone (still referenced) is not high confidence" do
+        insert(
+          worker: "Demo.History",
+          inserted_at: ago(20 * 86_400),
+          completed_at: ago(20 * 86_400)
+        )
+
+        insert(
+          worker: "Demo.StillCalled",
+          inserted_at: ago(8 * 86_400),
+          completed_at: ago(8 * 86_400)
+        )
+
+        [finding] =
+          only(
+            run(
+              dead_worker_candidates: [
+                window_days: 7,
+                known: ["Demo.StillCalled"],
+                ignore: ["Demo.History"],
+                scan: [
+                  apps: [],
+                  callers: %{"Demo.StillCalled" => ["lib/enqueuer.ex"]},
+                  cron: [],
+                  complete: true
+                ]
+              ]
+            ),
+            :dead_worker_candidates
+          )
+
+        assert finding.reason == :referenced
+        refute finding.message =~ "Confidence: high"
+        assert finding.message =~ "not a high-confidence"
+      end
+
+      test "dead_worker_candidates: a cron reference is not high confidence either" do
+        insert(
+          worker: "Demo.History",
+          inserted_at: ago(20 * 86_400),
+          completed_at: ago(20 * 86_400)
+        )
+
+        insert(
+          worker: "Demo.Nightly",
+          inserted_at: ago(8 * 86_400),
+          completed_at: ago(8 * 86_400)
+        )
+
+        [finding] =
+          only(
+            run(
+              dead_worker_candidates: [
+                window_days: 7,
+                known: ["Demo.Nightly"],
+                ignore: ["Demo.History"],
+                scan: [apps: [], callers: %{}, cron: ["Demo.Nightly"], complete: true]
+              ]
+            ),
+            :dead_worker_candidates
+          )
+
+        assert finding.reason == :referenced
+        assert finding.message =~ "cron"
+      end
+
+      test "dead_worker_candidates: unreferenced but recently enqueued is omitted" do
+        insert(
+          worker: "Demo.History",
+          inserted_at: ago(20 * 86_400),
+          completed_at: ago(20 * 86_400)
+        )
+
+        insert(worker: "Demo.Fresh", inserted_at: ago(60), completed_at: ago(50))
+
+        findings =
+          only(
+            run(
+              dead_worker_candidates: [
+                window_days: 7,
+                known: ["Demo.Fresh"],
+                ignore: ["Demo.History"],
+                scan: [apps: [], callers: %{}, cron: [], complete: true]
+              ]
+            ),
+            :dead_worker_candidates
+          )
+
+        refute Enum.any?(findings, &(&1.worker == "Demo.Fresh"))
+      end
+
+      test "dead_worker_candidates: insufficient history is unknown, not inactivity" do
+        # Finished-job history is only a minute long. A known worker with no
+        # rows must not be treated as inactive; the check reports unknown.
+        insert(worker: "Demo.Recent", inserted_at: ago(60), completed_at: ago(50))
+
+        [finding] =
+          only(
+            run(
+              dead_worker_candidates: [
+                window_days: 7,
+                known: ["Demo.NeverSeen"],
+                scan: [apps: [], callers: %{}, cron: [], complete: true]
+              ]
+            ),
+            :dead_worker_candidates
+          )
+
+        assert finding.reason == :insufficient_history
+        assert is_nil(finding.worker)
+        assert finding.message =~ "unknown, not proof of inactivity"
+        refute finding.message =~ "Confidence: high"
+      end
+
+      test "dead_worker_candidates: future-scheduled and pending jobs are not high confidence" do
+        insert(
+          worker: "Demo.History",
+          inserted_at: ago(20 * 86_400),
+          completed_at: ago(20 * 86_400)
+        )
+
+        insert(
+          worker: "Demo.Yearly",
+          inserted_at: ago(8 * 86_400),
+          completed_at: ago(8 * 86_400)
+        )
+
+        insert(
+          state: "scheduled",
+          worker: "Demo.Yearly",
+          inserted_at: ago(8 * 86_400),
+          scheduled_at: DateTime.add(@now, 2 * 365 * 86_400),
+          completed_at: nil,
+          attempted_at: nil
+        )
+
+        [finding] =
+          only(
+            run(
+              dead_worker_candidates: [
+                window_days: 7,
+                known: ["Demo.Yearly"],
+                ignore: ["Demo.History"],
+                scan: [apps: [], callers: %{}, cron: [], complete: true]
+              ]
+            ),
+            :dead_worker_candidates
+          )
+
+        assert finding.reason == :pending_jobs
+        assert finding.message =~ "not proof those jobs are dead"
+        refute finding.message =~ "Confidence: high"
+      end
+
+      test "dead_worker_candidates: available pending job is not high confidence" do
+        insert(
+          worker: "Demo.History",
+          inserted_at: ago(20 * 86_400),
+          completed_at: ago(20 * 86_400)
+        )
+
+        insert(
+          state: "available",
+          worker: "Demo.Queued",
+          inserted_at: ago(8 * 86_400),
+          scheduled_at: ago(8 * 86_400),
+          completed_at: nil,
+          attempted_at: nil
+        )
+
+        [finding] =
+          only(
+            run(
+              dead_worker_candidates: [
+                window_days: 7,
+                known: ["Demo.Queued"],
+                ignore: ["Demo.History"],
+                scan: [apps: [], callers: %{}, cron: [], complete: true]
+              ]
+            ),
+            :dead_worker_candidates
+          )
+
+        assert finding.reason == :pending_jobs
+      end
+
+      test "dead_worker_candidates: dynamic workers can be high confidence but the message warns about dispatch" do
+        insert(
+          worker: "Demo.History",
+          inserted_at: ago(20 * 86_400),
+          completed_at: ago(20 * 86_400)
+        )
+
+        insert(
+          worker: "QueueKeeperCheck.DeadCodeDynamicWorker",
+          inserted_at: ago(8 * 86_400),
+          completed_at: ago(8 * 86_400)
+        )
+
+        [finding] =
+          only(
+            run(
+              dead_worker_candidates: [
+                window_days: 7,
+                known: ["QueueKeeperCheck.DeadCodeDynamicWorker"],
+                ignore: ["Demo.History"],
+                scan: [apps: [], callers: %{}, cron: [], complete: true]
+              ]
+            ),
+            :dead_worker_candidates
+          )
+
+        assert finding.reason == :high_confidence
+        assert finding.message =~ "Dynamic dispatch"
+      end
+
+      test "dead_worker_candidates: seven-day boundary is inclusive (>=), unlike :dead_workers" do
+        insert(
+          worker: "Demo.History",
+          inserted_at: ago(20 * 86_400),
+          completed_at: ago(20 * 86_400)
+        )
+
+        insert(
+          worker: "Demo.Exact",
+          inserted_at: ago(7 * 86_400),
+          completed_at: ago(7 * 86_400)
+        )
+
+        insert(
+          worker: "Demo.Under",
+          inserted_at: ago(7 * 86_400 - 1),
+          completed_at: ago(7 * 86_400 - 1)
+        )
+
+        insert(
+          worker: "Demo.Over",
+          inserted_at: ago(7 * 86_400 + 1),
+          completed_at: ago(7 * 86_400 + 1)
+        )
+
+        combined =
+          run(
+            dead_worker_candidates: [
+              window_days: 7,
+              known: ["Demo.Exact", "Demo.Under", "Demo.Over"],
+              ignore: ["Demo.History"],
+              scan: [apps: [], callers: %{}, cron: [], complete: true]
+            ]
+          )
+          |> only(:dead_worker_candidates)
+          |> Map.new(&{&1.worker, &1})
+
+        assert combined["Demo.Exact"].reason == :high_confidence
+        assert combined["Demo.Over"].reason == :high_confidence
+        refute Map.has_key?(combined, "Demo.Under")
+
+        # Standalone :dead_workers keeps the strict `age > window` boundary:
+        # exactly 7 days does not fire; 7 days + 1 second does.
+        standalone =
+          run(dead_workers: [window_days: 7, use_ledger: false])
+          |> only(:dead_workers)
+          |> Enum.map(& &1.worker)
+
+        refute "Demo.Exact" in standalone
+        assert "Demo.Over" in standalone
+        refute "Demo.Under" in standalone
+      end
+
+      test "dead_worker_candidates and dead_workers: implicit window_days default is 7" do
+        insert(
+          worker: "Demo.History",
+          inserted_at: ago(20 * 86_400),
+          completed_at: ago(20 * 86_400)
+        )
+
+        insert(
+          worker: "Demo.WeekOld",
+          inserted_at: ago(7 * 86_400 + 1),
+          completed_at: ago(7 * 86_400 + 1)
+        )
+
+        combined =
+          only(
+            run(
+              dead_worker_candidates: [
+                known: ["Demo.WeekOld"],
+                ignore: ["Demo.History"],
+                scan: [apps: [], callers: %{}, cron: [], complete: true]
+              ]
+            ),
+            :dead_worker_candidates
+          )
+
+        assert hd(combined).threshold == 7 * 86_400
+        assert hd(combined).reason == :high_confidence
+
+        inactive =
+          only(
+            run(dead_workers: [known: ["Demo.WeekOld"], use_ledger: false]),
+            :dead_workers
+          )
+          |> Enum.find(&(&1.worker == "Demo.WeekOld"))
+
+        assert inactive.threshold == 7 * 86_400
+      end
+
+      test "dead_worker_candidates: incomplete scan coverage is not high confidence" do
+        insert(
+          worker: "Demo.History",
+          inserted_at: ago(20 * 86_400),
+          completed_at: ago(20 * 86_400)
+        )
+
+        insert(
+          worker: "Demo.Abandoned",
+          inserted_at: ago(8 * 86_400),
+          completed_at: ago(8 * 86_400)
+        )
+
+        # Injected callers skip the beam walk, so coverage.complete? is false.
+        [finding] =
+          only(
+            run(
+              dead_worker_candidates: [
+                window_days: 7,
+                known: ["Demo.Abandoned"],
+                ignore: ["Demo.History"],
+                scan: [apps: [], callers: %{"Someone.Else" => ["lib/x.ex"]}, cron: []]
+              ]
+            ),
+            :dead_worker_candidates
+          )
+
+        assert finding.reason == :incomplete_analysis
+        refute finding.message =~ "Confidence: high"
+      end
+
       test "config validation rejects bad options before any query" do
         {_, sql} =
           capture_sql(fn ->
@@ -1268,7 +1655,11 @@ defmodule QueueKeeperCheck.SharedCases do
                   [persisted_jobs: [workers: [:atom]]],
                   [persisted_jobs: [dynamic_queues: :yes]],
                   [persisted_jobs: [consumers: "default"]],
-                  [persisted_jobs: [discover: :yes]]
+                  [persisted_jobs: [discover: :yes]],
+                  [dead_worker_candidates: [window_days: 0]],
+                  [dead_worker_candidates: [known: [:atom]]],
+                  [dead_worker_candidates: [scan: :nope]],
+                  [dead_worker_candidates: [discover: :yes]]
                 ] do
               assert_raise ArgumentError, fn -> run(bad) end
             end

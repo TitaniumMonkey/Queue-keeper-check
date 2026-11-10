@@ -3,7 +3,7 @@
 [![CI](https://github.com/TitaniumMonkey/Queue-keeper-check/actions/workflows/ci.yml/badge.svg)](https://github.com/TitaniumMonkey/Queue-keeper-check/actions/workflows/ci.yml)
 
 Read-only health check for [Oban](https://github.com/oban-bg/oban) queues. It runs aggregate
-queries on `oban_jobs` and reports ten conditions with thresholds:
+queries on `oban_jobs` and reports eleven conditions with thresholds:
 
 | Check | Fires when | Default threshold | Severity |
 |---|---|---|---|
@@ -15,7 +15,7 @@ queries on `oban_jobs` and reports ten conditions with thresholds:
 | `:discarded` | discarded-job spike for a worker (silent failures) | 5 / 3600 s | warning, critical at 2x |
 | `:cancelled` | cancelled-job spike for a worker | 10 / 3600 s | warning, critical at 2x |
 | `:cron_missing` | an expected (usually cron) worker has had no job inserted for too long | off until you list workers | always critical |
-| `:dead_workers` | a worker has had no job inserted within a window of any positive integer number of days (enqueue inactivity, not proof of unused code). Uses last enqueue and reports leftover nonterminal/future jobs. Prefers the opt-in last-seen ledger when attached; otherwise reads `oban_jobs` and stays silent when history is shorter than the window | off until you set `window_days` (7, 14 and 30 are examples; 14 is the default if you only set `known` or `discover: true`) | always warning |
+| `:dead_workers` | a worker has had no job inserted within a window of any positive integer number of days (enqueue inactivity, not proof of unused code). Uses last enqueue and reports leftover nonterminal/future jobs. Prefers the opt-in last-seen ledger when attached; otherwise reads `oban_jobs` and stays silent when history is shorter than the window | off until you set `window_days` (7, 14 and 30 are examples; **7** is the default if you only set `known` or `discover: true`, changed from 14 in 0.3.0). Inactivity is a strict `age > window` | always warning |
 | `:persisted_jobs` | nonterminal jobs (including future-scheduled and core `suspended`) whose worker or queue is missing from a trusted inventory you supply. Reasons: missing worker, unconfigured queue, paused queue, no active consumer (only with a consumer snapshot), or insufficient evidence. Never infers a cluster-wide gap from one node | off until you pass `workers`, `queues`, `paused_queues`, `discover: true`, or a `consumers` snapshot | always warning |
 
 "Due" means `available`, or `scheduled`/`retryable` whose `scheduled_at` has passed. Job `args`,
@@ -34,8 +34,9 @@ queries on `oban_jobs` and reports ten conditions with thresholds:
   `:dead_workers` fallback that scans `oban_jobs` when no ledger is present. The opt-in
   `:persisted_jobs` query is filtered on `state IN (...)` and can use Oban's
   state-prefixed indexes. On a 10M-row table a full run without the seq-scan checks
-  takes about 2 s. With the ledger, `:dead_workers` is an O(workers) read plus a
-  bounded pending-job query.
+  takes about 2 s. With the ledger, `:dead_workers` and `:dead_worker_candidates`
+  are an O(workers) read plus a bounded pending-job query. The combined check
+  reuses those SELECTs and adds a local static scan; it issues no new query shapes.
 * `mix queue_keeper.check` and `QueueKeeperCheck.Release` start only your repo, never your
   application or Oban.
 * Database errors never raise. A check that cannot complete is reported, and the exit
@@ -50,13 +51,15 @@ Status: v0.3.0, early. The API may change before 1.0.
 
 > **Pruner caveat (read this first).** Several checks depend on rows in final states:
 > `:stalled` (recent `attempted_at`), `:retry_storm` (with `include_completed: true`),
-> `:discarded`, `:cancelled`, `:cron_missing` and `:dead_workers`. If you run Oban's
+> `:discarded`, `:cancelled`, `:cron_missing`, `:dead_workers` and
+> `:dead_worker_candidates`. If you run Oban's
 > Pruner, it deletes `completed`, `cancelled` and `discarded` jobs older than `max_age`,
 > **default 60 seconds**. With that default, the 3600 s spike windows only ever see the
 > last minute, and `:cron_missing` reports any worker whose last run was pruned.
 > `:dead_workers` will not flag a worker when observable history is shorter than the
-> window (so a 14-day window with a 60 s Pruner stays silent, rather than calling
-> everything dead). For `:dead_workers`, attach the [opt-in last-seen ledger](#dead-workers-dead-code-paths)
+> window (so a 7-day window with a 60 s Pruner stays silent, rather than calling
+> everything dead). `:dead_worker_candidates` reports that short history as
+> unknown instead of staying silent. For either check, attach the [opt-in last-seen ledger](#dead-workers-dead-code-paths)
 > instead of raising `max_age`: some sites prune aggressively and cannot keep days of
 > `oban_jobs`. For the other history-based checks, set the Pruner's `max_age` to at least
 > your largest window (for `:cron_missing`, longer than your longest expected gap), e.g.
@@ -193,8 +196,11 @@ rows longer than the gap (see the caveat above).
 
 ### Dead workers (dead code paths)
 
+
 Set `window_days` to any positive integer (days). 7, 14 and 30 are common starting
-points, not a limited set of values. The check looks at the newest `inserted_at` for each
+points, not a limited set of values. If you set `known` or `discover: true` without
+`window_days`, the implicit window is **7 days** (this was 14 in 0.3.0; set
+`window_days: 14` to keep the old default). The check looks at the newest `inserted_at` for each
 worker in any state, so a worker that is still being enqueued is not reported even if it
 has not executed recently.
 
@@ -269,6 +275,52 @@ Runtime-only Pro cron rules stored in the database are not visible; list those i
 **Status atom migration.** `scan/1` now returns `status: :review_candidate` (not
 `:dead`). Prefer `review_candidates/1`; `dead_workers/1` is a compatibility alias.
 `--json` includes `review_candidates` and a deprecated `dead` key for the same list.
+
+### Combined dead-worker candidates
+
+`:dead_worker_candidates` is an opt-in, report-only check that combines enqueue
+inactivity with the static scan and leftover-job evidence. A finding is
+**high confidence** only when every one of these is true:
+
+* no job has been inserted for at least `window_days` (inclusive `age >= window`;
+  default 7 days when you only set `known` or `discover: true`)
+* observable history (ledger recording age, or finished-job history) is at least
+  that long
+* the static scan is complete and the worker has no application-code or cron
+  reference
+* there are no leftover pending or future-scheduled jobs
+
+It never claims a worker is definitely dead. Reasons include `:high_confidence`,
+`:referenced` (old but still mentioned in code or cron), `:pending_jobs`,
+`:incomplete_analysis`, `:insufficient_history` (unknown, not proof of
+inactivity) and `:unknown`. Every message includes the evidence and a caveat
+about dynamic dispatch, runtime-only cron, jobs that run less often than the
+window, and retention.
+
+This is a different boundary from `:dead_workers`, which keeps a strict
+`age > window` (exactly N days does not fire; N days plus one second does).
+
+```elixir
+QueueKeeperCheck.run(MyApp.Repo,
+  dead_worker_candidates: [
+    window_days: 7,
+    known: ["MyApp.Workers.LegacyImport"],
+    ignore: ["MyApp.YearlyClose"],
+    scan: [apps: [:my_app]]
+  ]
+)
+```
+
+To diagnose whether a compiled worker such as `UpdateBot` is visible to the
+static scan (default discovery skips OTP, Oban, Ecto, and this library itself):
+
+```text
+mix queue_keeper.dead_code --json --known UpdateBot
+```
+
+Read `coverage` and whether the name is in `review_candidates` or `live`. If
+the real module is namespaced, pass that name (`MyApp.UpdateBot`) and also run
+without `--known` after the host app is compiled and loaded.
 
 ### Persisted-job reconciliation
 

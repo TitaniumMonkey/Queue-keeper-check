@@ -23,7 +23,7 @@ below.
 * Pro v1.7+ requires Oban 2.21+ and its v14 migration, which adds the `suspended` state
   (used for workflows and chains waiting on dependencies). `:backlog` and `:stalled`
   still ignore `suspended` jobs, which is right for "not due". `:dead_workers` (pending
-  leftovers) and the opt-in `:persisted_jobs` check include `suspended` as nonterminal
+  leftovers), the opt-in `:dead_worker_candidates` check, and the opt-in `:persisted_jobs` check include `suspended` as nonterminal
   work so leftover held jobs are visible. That inclusion uses the **core** Oban
   `suspended` state; Pro workflow behaviour has not been verified on a licensed Pro
   system.

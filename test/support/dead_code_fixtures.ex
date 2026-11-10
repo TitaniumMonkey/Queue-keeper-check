@@ -52,3 +52,18 @@ defmodule QueueKeeperCheck.DeadCodeEnqueuer do
     apply(mod, :new, [%{ok: true}])
   end
 end
+
+defmodule UpdateBot do
+  @moduledoc false
+  # Bare module name, for discovery diagnostics (see dead_code_test).
+  use Oban.Worker, queue: :default
+  @impl Oban.Worker
+  def perform(_job), do: :ok
+end
+
+defmodule QueueKeeperCheck.UpdateBot do
+  @moduledoc false
+  use Oban.Worker, queue: :default
+  @impl Oban.Worker
+  def perform(_job), do: :ok
+end

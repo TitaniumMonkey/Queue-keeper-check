@@ -22,7 +22,7 @@ defmodule QueueKeeperCheck.Config do
   | `:discarded` | `window` / `max` | 3600 / 5 | jobs discarded in the window, per worker |
   | `:cancelled` | `window` / `max` | 3600 / 10 | jobs cancelled in the window, per worker |
   | `:cron_missing` | `expected` | `%{}` (off) | worker => max seconds between insertions, e.g. `%{"MyApp.Nightly" => 90_000}` |
-  | `:dead_workers` | `window_days` | `nil` (off) | any positive integer number of days since a worker was last *inserted* (enqueued). 7, 14 and 30 are common examples; if you set `known` or `discover: true` without `window_days`, the window is 14. There is no fixed set of allowed values |
+  | `:dead_workers` | `window_days` | `nil` (off) | any positive integer number of days since a worker was last *inserted* (enqueued). 7, 14 and 30 are common examples; if you set `known` or `discover: true` without `window_days`, the window is **7** (was 14 in 0.3.0). There is no fixed set of allowed values. Inactivity here is a strict `age > window` (exactly N days does not fire) |
   | `:dead_workers` | `ignore` | `[]` | worker names to skip (rare/seasonal jobs, or ones you have reviewed) |
   | `:dead_workers` | `known` | `[]` | extra worker names to check, including those with no rows at all (workers that never ran, or were fully pruned) |
   | `:dead_workers` | `overrides` | `%{}` | per-worker window in days, e.g. `%{"MyApp.YearlyClose" => 400}` |
@@ -37,6 +37,9 @@ defmodule QueueKeeperCheck.Config do
   | `:persisted_jobs` | `consumers` | `:unknown` | `:unknown` (default): never emit `:no_active_consumer` (one node cannot prove a deployment-wide gap). A list of queue name strings is a cluster-wide snapshot you supply; queues with leftover jobs not in that list may be `:no_active_consumer` |
   | `:persisted_jobs` | `discover` | `false` | union `Oban.Worker` modules in loaded non-OTP apps into the worker inventory (needs the host app started; `mix queue_keeper.check` and `Release` do not start it). If `discover` is the only worker source and it finds nothing, the check reports `:insufficient_evidence` instead of treating every job worker as missing |
   | `:persisted_jobs` | `ignore_workers` / `ignore_queues` | `[]` | names to skip |
+  | `:dead_worker_candidates` | `window_days` | `nil` (off) | any positive integer; **7** if you only set `known` or `discover: true`. Combined check uses inclusive `age >= window` ("at least N days") |
+  | `:dead_worker_candidates` | `ignore` / `known` / `overrides` / `discover` / `use_ledger` | same as `:dead_workers` | same meanings. Always reports insufficient history as `:unknown` (does not stay silent) |
+  | `:dead_worker_candidates` | `scan` | `[]` | options forwarded to `QueueKeeperCheck.DeadCode.scan_report/1` (`:apps`, `:callers`, `:cron`, `:beam_roots`, …) |
 
   `:retry_storm` counts, per worker, within the window:
 
@@ -58,8 +61,10 @@ defmodule QueueKeeperCheck.Config do
   production outage).
 
   `:dead_workers` is off until you set `window_days` (any positive integer), or you
-  set a non-empty `known` list or `discover: true`. It uses last enqueue, not last
-  execution: a worker that is still being enqueued is not dead code. When the
+  set a non-empty `known` list or `discover: true`. If you omit `window_days`, the
+  implicit window is 7 days (changed from 14 in 0.3.0; set `window_days: 14` to
+  keep the old implicit window). It uses last enqueue, not last execution: a
+  worker that is still being enqueued is not unused code. When the
   opt-in last-seen ledger is present (see `QueueKeeperCheck.Ledger`), activity
   comes from that tiny table and the check stays silent until the ledger itself
   has been recording for the window; you do not need to raise the Pruner
@@ -76,6 +81,14 @@ defmodule QueueKeeperCheck.Config do
   prefix; run once per Oban instance. Worker and queue names from the
   database stay strings. Oban Pro-specific states or archive tables are
   not queried; Pro support beyond core `suspended` is untested and unverified.
+
+  `:dead_worker_candidates` is off until you set `window_days`, a non-empty
+  `known` list, or `discover: true`. It combines enqueue inactivity with the
+  static scan and leftover-job evidence. A high-confidence finding requires
+  both no enqueue for at least the window (inclusive; default 7 days) with
+  sufficient history, and no code or cron reference, with no pending or
+  future-scheduled jobs and a complete static scan. It never claims a worker
+  is definitely dead. Insufficient history is reported as `:unknown`.
 
   Safety options (top level, not per check):
 
@@ -118,6 +131,15 @@ defmodule QueueKeeperCheck.Config do
       discover: false,
       ignore_workers: [],
       ignore_queues: []
+    ],
+    dead_worker_candidates: [
+      window_days: nil,
+      ignore: [],
+      known: [],
+      overrides: %{},
+      discover: false,
+      use_ledger: true,
+      scan: []
     ]
   ]
 
@@ -243,14 +265,17 @@ defmodule QueueKeeperCheck.Config do
         )
   end
 
-  defp validate!(:dead_workers, :window_days, nil), do: :ok
+  defp validate!(check, :window_days, nil)
+       when check in [:dead_workers, :dead_worker_candidates],
+       do: :ok
 
-  defp validate!(:dead_workers, :window_days, v) do
+  defp validate!(check, :window_days, v)
+       when check in [:dead_workers, :dead_worker_candidates] do
     unless is_integer(v) and v >= 1,
       do:
         raise(
           ArgumentError,
-          "dead_workers :window_days must be a positive integer (days), got: #{inspect(v)}"
+          "#{check} :window_days must be a positive integer (days), got: #{inspect(v)}"
         )
   end
 
@@ -273,6 +298,15 @@ defmodule QueueKeeperCheck.Config do
         raise(
           ArgumentError,
           "overrides must be a map of worker name (string) => positive integer days, got: #{inspect(map)}"
+        )
+  end
+
+  defp validate!(:dead_worker_candidates, :scan, v) do
+    unless Keyword.keyword?(v),
+      do:
+        raise(
+          ArgumentError,
+          "dead_worker_candidates :scan must be a keyword list, got: #{inspect(v)}"
         )
   end
 

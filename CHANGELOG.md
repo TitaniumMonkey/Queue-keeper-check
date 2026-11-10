@@ -6,6 +6,28 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `:dead_worker_candidates` (opt-in, report-only): combined review of enqueue
+  inactivity and static reachability. A high-confidence finding requires no
+  enqueue for at least `window_days` (inclusive `age >= window`; default 7
+  days when you only set `known` or `discover: true`) with sufficient history,
+  no code or cron reference, a complete static scan, and no leftover pending or
+  future-scheduled jobs. It never claims a worker is definitely dead.
+  Insufficient history is reported as `:unknown`, not as inactivity. Reasons:
+  `:high_confidence`, `:referenced`, `:pending_jobs`, `:incomplete_analysis`,
+  `:insufficient_history`, `:unknown`. Reuses the existing `:dead_workers`
+  activity and pending-job SELECTs plus `DeadCode.scan_report/1`.
+
+### Changed
+
+- The implicit `window_days` default for `:dead_workers` when you set `known` or
+  `discover: true` without `window_days` is now **7** (was 14 in 0.3.0). The
+  same 7-day implicit default applies to `:dead_worker_candidates`. The window
+  remains any positive integer; set `window_days: 14` to keep the previous
+  implicit window. The standalone `:dead_workers` comparison is still a strict
+  `age > window` (exactly N days does not fire).
+
 ## [0.3.0] - 2026-11-10
 
 ### Added

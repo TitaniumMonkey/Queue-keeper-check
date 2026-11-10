@@ -5,7 +5,7 @@ defmodule QueueKeeperCheck do
       report = QueueKeeperCheck.run(MyApp.Repo)
       IO.puts(QueueKeeperCheck.format(report))
 
-  Detects ten conditions (see `checks/0` and `QueueKeeperCheck.Config` for thresholds):
+  Detects eleven conditions (see `checks/0` and `QueueKeeperCheck.Config` for thresholds):
 
   * `:orphaned` - jobs `executing` far longer than any job should run (execution age only;
     possibly orphaned by a node crash)
@@ -27,7 +27,8 @@ defmodule QueueKeeperCheck do
     source of truth and the check stays silent until the ledger has been recording for
     the window (no need to raise the Pruner `max_age`). Otherwise it falls back to
     `oban_jobs` and will not flag workers when finished-job history is shorter than the
-    window
+    window. If you omit `window_days` but set `known` or `discover: true`, the
+    window is 7 days (was 14 in 0.3.0)
   * `:persisted_jobs` - opt-in, report-only reconciliation of nonterminal jobs
     (including future `scheduled` and core `suspended`) against a trusted inventory of
     deployed workers and effective queues. Classifies missing workers, unconfigured
@@ -35,6 +36,11 @@ defmodule QueueKeeperCheck do
     or insufficient evidence. Off until you pass inventory. Never infers
     deployment-wide absence from one node. Oban Pro beyond core `suspended` is
     untested and unverified
+  * `:dead_worker_candidates` - opt-in combined review of enqueue inactivity and
+    static reachability. A high-confidence candidate has had no enqueue for at
+    least `window_days` (default 7, inclusive) with sufficient history, and no
+    code or cron reference, and no leftover pending or future-scheduled jobs.
+    Never claims a worker is definitely dead. Insufficient history is unknown
 
   Options: any check name with a keyword list of thresholds, plus
 
@@ -62,7 +68,8 @@ defmodule QueueKeeperCheck do
     :cancelled,
     :cron_missing,
     :dead_workers,
-    :persisted_jobs
+    :persisted_jobs,
+    :dead_worker_candidates
   ]
 
   @doc "All check names, in the order they run."

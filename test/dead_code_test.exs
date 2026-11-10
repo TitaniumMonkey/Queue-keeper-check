@@ -109,4 +109,34 @@ defmodule QueueKeeperCheck.DeadCodeTest do
     assert by["QueueKeeperCheck.DeadCodeDirectWorker"].reason == :no_call_sites
     assert by["QueueKeeperCheck.DeadCodeAbandonedWorker"].status == :review_candidate
   end
+
+  test "full default scan does not discover UpdateBot because :queue_keeper_check is skipped" do
+    report = DeadCode.scan_report(ignore: ["QueueKeeperCheck.DeadTestWorker"])
+    names = Enum.map(report.workers, & &1.worker)
+    refute "UpdateBot" in names
+    refute "QueueKeeperCheck.UpdateBot" in names
+    refute :queue_keeper_check in List.wrap(report.coverage.apps)
+  end
+
+  test "UpdateBot is found when its application is scanned explicitly" do
+    report =
+      DeadCode.scan_report(
+        apps: [:queue_keeper_check],
+        ignore: ["QueueKeeperCheck.DeadTestWorker"]
+      )
+
+    by = Map.new(report.workers, &{&1.worker, &1})
+    assert by["UpdateBot"].status == :review_candidate
+    assert by["QueueKeeperCheck.UpdateBot"].status == :review_candidate
+    # Neither has a static caller in this project.
+    assert by["UpdateBot"].reason == :no_call_sites
+    assert by["QueueKeeperCheck.UpdateBot"].reason == :no_call_sites
+  end
+
+  test "UpdateBot is also found via --known / known: even if discover misses it" do
+    assert DeadCode.review_candidates(
+             apps: [],
+             known: ["UpdateBot", "QueueKeeperCheck.UpdateBot"]
+           ) == ["QueueKeeperCheck.UpdateBot", "UpdateBot"]
+  end
 end

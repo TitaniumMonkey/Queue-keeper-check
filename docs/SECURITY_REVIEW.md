@@ -133,7 +133,9 @@ SELECT worker, max(inserted_at), max(id) FROM oban_jobs WHERE worker = ANY($n) G
 -- dead_workers fallback (opt-in, no ledger): sequential scan, no worker/inserted_at index
 SELECT min(inserted_at) FROM oban_jobs WHERE state IN ('completed','cancelled','discarded')
 SELECT worker, max(inserted_at), max(id), count(id) FROM oban_jobs GROUP BY worker
--- dead_workers pending leftovers + persisted_jobs (opt-in): state-prefixed, includes future scheduled and suspended
+-- dead_workers pending leftovers, dead_worker_candidates, and persisted_jobs (opt-in):
+-- state-prefixed, includes future scheduled and suspended. :dead_worker_candidates
+-- reuses the dead_workers fallback / ledger SELECTs plus this pending query; no new shapes.
 SELECT worker, count(id), min(scheduled_at), max(id) FROM oban_jobs
   WHERE state IN ('available','scheduled','retryable','executing','suspended') GROUP BY worker
 SELECT queue, worker, state, count(id), min(scheduled_at), max(id) FROM oban_jobs

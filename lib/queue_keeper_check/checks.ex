@@ -9,7 +9,8 @@ defmodule QueueKeeperCheck.Checks do
   `attempted_by` are never selected or filtered on. When the opt-in ledger is present,
   `:dead_workers` SELECTs from `queue_keeper_worker_sightings` and
   `queue_keeper_ledger_meta` instead of scanning `oban_jobs`. The opt-in
-  `:persisted_jobs` check also SELECTs nonterminal `oban_jobs` rows (state-prefixed).
+  `:persisted_jobs` and `:dead_worker_candidates` checks also SELECT nonterminal
+  `oban_jobs` rows (state-prefixed).
   Each query is either an aggregate
   (one row per queue or worker) or capped with `LIMIT`, and each is shaped to use Oban's
   standard indexes (`state, queue, priority, scheduled_at, id`; `state, discarded_at`;
@@ -407,7 +408,7 @@ defmodule QueueKeeperCheck.Checks do
 
   # -- dead workers (dead code paths) ----------------------------------------------------
   # Opt-in: set `window_days` to any positive integer (7, 14 and 30 are common examples;
-  # if you only set `known` or `discover: true`, the window defaults to 14). Last activity
+  # if you only set `known` or `discover: true`, the window defaults to 7). Last activity
   # is last enqueue, not last execution.
   #
   # Prefer the opt-in last-seen ledger (`QueueKeeperCheck.Ledger`) when it is present:
@@ -425,7 +426,7 @@ defmodule QueueKeeperCheck.Checks do
   # `statement_timeout`. The pending-job query is filtered on `state IN (...)`
   # and can use Oban's standard state-prefixed indexes.
 
-  @default_dead_window_days 14
+  @default_dead_window_days 7
   @seconds_per_day 86_400
 
   def dead_workers(repo, cfg, now, qopts) do
@@ -565,6 +566,166 @@ defmodule QueueKeeperCheck.Checks do
       |> Map.new(fn {w, at, id, n} -> {w, {at, id, n}} end)
 
     {:jobs, history_secs, latest}
+  end
+
+  # -- combined dead-worker candidates (opt-in) ------------------------------------------
+  # Report-only combination of enqueue inactivity and the static scan.
+  # High confidence requires both signals, sufficient history, a complete
+  # scan, and no leftover nonterminal/future jobs. Never claims a worker is
+  # definitely dead. See QueueKeeperCheck.DeadWorkerCandidates.
+
+  def dead_worker_candidates(repo, cfg, now, qopts) do
+    dwc = cfg[:dead_worker_candidates]
+    window_days = dwc[:window_days]
+    known = dwc[:known]
+    discover? = dwc[:discover]
+
+    if not (is_integer(window_days) or known != [] or discover?) do
+      []
+    else
+      days = window_days || QueueKeeperCheck.DeadWorkerCandidates.default_window_days()
+      dead_worker_candidates_run(repo, cfg, now, qopts, days)
+    end
+  end
+
+  defp dead_worker_candidates_run(repo, cfg, now, qopts, default_days) do
+    dwc = cfg[:dead_worker_candidates]
+    window_secs = QueueKeeperCheck.DeadWorkerCandidates.window_seconds(default_days)
+
+    skip =
+      MapSet.new(dwc[:ignore])
+      |> MapSet.union(MapSet.new(Map.keys(cfg[:cron_missing][:expected])))
+
+    {source, history_secs, latest} = dead_workers_activity(repo, dwc, now, qopts)
+    pending = pending_by_worker(repo, qopts)
+
+    scan = List.wrap(dwc[:scan])
+
+    scan_opts =
+      scan
+      |> Keyword.merge(
+        known: Enum.uniq(List.wrap(dwc[:known]) ++ List.wrap(Keyword.get(scan, :known)))
+      )
+      |> Keyword.put_new(:ignore, dwc[:ignore])
+
+    {scan_by, coverage} =
+      try do
+        report = QueueKeeperCheck.DeadCode.scan_report(scan_opts)
+        {Map.new(report.workers, &{&1.worker, &1}), report.coverage}
+      rescue
+        _ ->
+          {%{}, %{complete?: false}}
+      end
+
+    # History shorter than the default window: unknown, not inactivity.
+    if history_secs < window_secs do
+      history_desc = if history_secs > 0, do: "#{history_secs}s", else: "none"
+      source_desc = if source == :ledger, do: "ledger recording age", else: "finished-job history"
+
+      [
+        %Finding{
+          check: :dead_worker_candidates,
+          severity: :warning,
+          reason: :insufficient_history,
+          count: 0,
+          value: history_secs,
+          threshold: window_secs,
+          message:
+            "dead_worker_candidates window (#{default_days} days / #{window_secs}s) exceeds " <>
+              "observable #{source_desc} (#{history_desc}). This is unknown, not proof of " <>
+              "inactivity (new environment, short ledger, or aggressive pruning). " <>
+              "Do not raise Pruner max_age just for this check; attach the ledger, or shrink " <>
+              "window_days. Static references are not enough to call a worker dead, and " <>
+              "the absence of references is not a high-confidence finding without history."
+        }
+      ]
+    else
+      candidates =
+        latest
+        |> Map.keys()
+        |> Enum.concat(dwc[:known])
+        |> Enum.concat(if(dwc[:discover], do: discovered_workers(), else: []))
+        |> Enum.concat(Map.keys(scan_by))
+        |> Enum.uniq()
+        |> Enum.reject(&MapSet.member?(skip, &1))
+        |> Enum.sort()
+
+      for worker <- candidates,
+          days = Map.get(dwc[:overrides], worker, default_days),
+          worker_window = QueueKeeperCheck.DeadWorkerCandidates.window_seconds(days) do
+        {at, id, n} = Map.get(latest, worker, {nil, nil, 0})
+
+        {pending_status, pending_count, next_at, pending_id} =
+          case pending do
+            {:ok, map} ->
+              {pn, pat, pid} = Map.get(map, worker, {0, nil, nil})
+              {:ok, pn, pat, pid}
+
+            :error ->
+              {:error, 0, nil, nil}
+          end
+
+        {static, static_reason, static_files} =
+          case Map.get(scan_by, worker) do
+            %{status: :live, reason: reason, files: files} ->
+              {:referenced, reason, files}
+
+            %{status: :review_candidate, reason: reason, files: files} ->
+              {:unreferenced, reason, files}
+
+            nil ->
+              {:not_in_scan, nil, []}
+          end
+
+        # `:complete` on scan: is a test/operator override. Injected `:callers`
+        # otherwise make DeadCode.scan_report/1 report complete?: false.
+        scan_complete? =
+          case Keyword.get(scan, :complete) do
+            flag when is_boolean(flag) -> flag
+            _ -> coverage[:complete?] == true
+          end
+
+        attrs = %{
+          worker: worker,
+          history_secs: history_secs,
+          window_secs: worker_window,
+          window_days: days,
+          now: now,
+          last_inserted_at: at,
+          pending_status: pending_status,
+          pending_count: pending_count,
+          next_scheduled_at: next_at,
+          static: static,
+          static_reason: static_reason,
+          static_files: static_files,
+          scan_complete?: scan_complete?
+        }
+
+        case QueueKeeperCheck.DeadWorkerCandidates.classify(attrs) do
+          :omit ->
+            nil
+
+          {reason, message} ->
+            job_ids =
+              [id, pending_id]
+              |> Enum.reject(&is_nil/1)
+              |> Enum.uniq()
+
+            %Finding{
+              check: :dead_worker_candidates,
+              severity: :warning,
+              reason: reason,
+              worker: worker,
+              count: max(n, pending_count),
+              value: QueueKeeperCheck.DeadWorkerCandidates.age(at, now),
+              threshold: worker_window,
+              job_ids: job_ids,
+              message: message
+            }
+        end
+      end
+      |> Enum.reject(&is_nil/1)
+    end
   end
 
   # -- persisted jobs (opt-in inventory reconciliation) -----------------------------------

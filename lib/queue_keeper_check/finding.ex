@@ -8,9 +8,12 @@ defmodule QueueKeeperCheck.Finding do
   * `:count` - number of jobs involved
   * `:value` / `:threshold` - the measured value and the limit it crossed
   * `:message` - one human-readable line
-  * `:reason` - optional machine-readable kind (used by `:persisted_jobs`:
+  * `:reason` - optional machine-readable kind. For `:persisted_jobs`:
     `:missing_worker`, `:unconfigured_queue`, `:paused_queue`,
-    `:no_active_consumer`, `:insufficient_evidence`). `nil` for other checks
+    `:no_active_consumer`, `:insufficient_evidence`. For
+    `:dead_worker_candidates`: `:high_confidence`, `:referenced`,
+    `:pending_jobs`, `:incomplete_analysis`, `:insufficient_history`,
+    `:unknown`. `nil` for other checks
   * `:job_ids` - up to 10 sample job ids for follow-up
   """
   @derive Jason.Encoder
