@@ -4,9 +4,11 @@ defmodule QueueKeeperCheck.Checks do
   `QueueKeeperCheck.Finding` structs. `QueueKeeperCheck.run/2` wraps each call in
   `QueueKeeperCheck.Guard`; call these directly only if you apply your own limits.
 
-  Every query is a plain `SELECT` on `oban_jobs` that reads only `id`, `state`, `queue`,
-  `worker`, `attempt` and timestamp columns. `args`, `meta`, `errors`, `tags` and
-  `attempted_by` are never selected or filtered on. Each query is either an aggregate
+  Every query is a plain `SELECT`. Checks read only `id`, `state`, `queue`,
+  `worker`, `attempt` and timestamp columns from `oban_jobs`. `args`, `meta`, `errors`, `tags` and
+  `attempted_by` are never selected or filtered on. When the opt-in ledger is present,
+  `:dead_workers` SELECTs from `queue_keeper_worker_sightings` and
+  `queue_keeper_ledger_meta` instead of scanning `oban_jobs`. Each query is either an aggregate
   (one row per queue or worker) or capped with `LIMIT`, and each is shaped to use Oban's
   standard indexes (`state, queue, priority, scheduled_at, id`; `state, discarded_at`;
   `state, cancelled_at`; the primary key). See `docs/SECURITY_REVIEW.md` for the exact SQL
@@ -398,16 +400,17 @@ defmodule QueueKeeperCheck.Checks do
   # -- dead workers (dead code paths) ----------------------------------------------------
   # Opt-in: set `window_days` to any positive integer (7, 14 and 30 are common examples;
   # if you only set `known` or `discover: true`, the window defaults to 14). Last activity
-  # is `max(inserted_at)` per worker in any state: a worker still being enqueued is not
-  # dead, even if it has not executed recently.
+  # is last enqueue, not last execution.
   #
-  # The Pruner deletes finished jobs older than `max_age`. If the oldest finished row
-  # (`completed` / `cancelled` / `discarded`) is newer than a worker's window, that
-  # worker is not flagged: a short retention would otherwise look like "dead".
-  # Set `report_short_history: true` to emit a warning in that case.
+  # Prefer the opt-in last-seen ledger (`QueueKeeperCheck.Ledger`) when it is present:
+  # one row per worker, no need to raise Pruner max_age, and a cheap read. Until the
+  # ledger itself has been recording for the window, stay silent (or emit
+  # `report_short_history`). Without a ledger, fall back to `max(inserted_at)` on
+  # oban_jobs; if the oldest finished row is newer than the window, do not flag.
   #
-  # Cost: `worker` and `inserted_at` are not indexed by Oban, so this is a sequential
-  # scan of oban_jobs, like `:cron_missing`, bounded by `statement_timeout`.
+  # Cost of the fallback: `worker` and `inserted_at` are not indexed by Oban, so that
+  # path is a sequential scan of oban_jobs, like `:cron_missing`, bounded by
+  # `statement_timeout`.
 
   @default_dead_window_days 14
   @seconds_per_day 86_400
@@ -437,22 +440,7 @@ defmodule QueueKeeperCheck.Checks do
       |> Enum.concat(if(uw[:discover], do: discovered_workers(), else: []))
       |> Enum.uniq()
 
-    oldest_finished =
-      from(j in Job,
-        where: j.state in ["completed", "cancelled", "discarded"],
-        select: type(min(j.inserted_at), :utc_datetime_usec)
-      )
-      |> repo.one(qopts)
-
-    history_secs = if oldest_finished, do: age(oldest_finished, now), else: 0
-
-    latest =
-      from(j in Job,
-        group_by: j.worker,
-        select: {j.worker, type(max(j.inserted_at), :utc_datetime_usec), max(j.id), count(j.id)}
-      )
-      |> repo.all(qopts)
-      |> Map.new(fn {w, at, id, n} -> {w, {at, id, n}} end)
+    {source, history_secs, latest} = dead_workers_activity(repo, uw, now, qopts)
 
     workers =
       latest
@@ -491,7 +479,6 @@ defmodule QueueKeeperCheck.Checks do
 
     if uw[:report_short_history] and history_secs < default_days * @seconds_per_day do
       threshold = default_days * @seconds_per_day
-      history_desc = if oldest_finished, do: "#{history_secs}s", else: "no finished rows"
 
       [
         %Finding{
@@ -500,17 +487,68 @@ defmodule QueueKeeperCheck.Checks do
           count: 0,
           value: history_secs,
           threshold: threshold,
-          message:
-            "dead_workers window (#{default_days} days / #{threshold}s) exceeds observable " <>
-              "finished-job history (#{history_desc}). Cannot determine dead workers without " <>
-              "false positives. Raise the Pruner max_age to at least #{default_days} days, or " <>
-              "shrink window_days."
+          message: short_history_message(source, default_days, threshold, history_secs)
         }
         | findings
       ]
     else
       findings
     end
+  end
+
+  defp dead_workers_activity(repo, uw, now, qopts) do
+    if uw[:use_ledger] do
+      case QueueKeeperCheck.Ledger.fetch(repo, qopts_to_opts(qopts)) do
+        {:ok, %{started_at: started, sightings: latest}} ->
+          {:ledger, age(started, now), latest}
+
+        :absent ->
+          dead_workers_from_jobs(repo, now, qopts)
+      end
+    else
+      dead_workers_from_jobs(repo, now, qopts)
+    end
+  end
+
+  defp dead_workers_from_jobs(repo, now, qopts) do
+    oldest_finished =
+      from(j in Job,
+        where: j.state in ["completed", "cancelled", "discarded"],
+        select: type(min(j.inserted_at), :utc_datetime_usec)
+      )
+      |> repo.one(qopts)
+
+    history_secs = if oldest_finished, do: age(oldest_finished, now), else: 0
+
+    latest =
+      from(j in Job,
+        group_by: j.worker,
+        select: {j.worker, type(max(j.inserted_at), :utc_datetime_usec), max(j.id), count(j.id)}
+      )
+      |> repo.all(qopts)
+      |> Map.new(fn {w, at, id, n} -> {w, {at, id, n}} end)
+
+    {:jobs, history_secs, latest}
+  end
+
+  defp qopts_to_opts(qopts), do: Keyword.take(qopts, [:prefix])
+
+  defp short_history_message(:ledger, days, threshold, history_secs) do
+    history_desc = if history_secs > 0, do: "#{history_secs}s", else: "just started"
+
+    "dead_workers window (#{days} days / #{threshold}s) exceeds the ledger's recording " <>
+      "age (#{history_desc}). Cannot determine dead workers without false positives. " <>
+      "Keep the ledger attached; findings start once it has been recording for #{days} " <>
+      "days. Do not raise the Pruner max_age just for this check."
+  end
+
+  defp short_history_message(:jobs, days, threshold, history_secs) do
+    history_desc = if history_secs > 0, do: "#{history_secs}s", else: "no finished rows"
+
+    "dead_workers window (#{days} days / #{threshold}s) exceeds observable " <>
+      "finished-job history (#{history_desc}). Cannot determine dead workers without " <>
+      "false positives. Attach QueueKeeperCheck.Ledger so this check does not depend " <>
+      "on Pruner retention, or shrink window_days."
   end
 
   defp discovered_workers do

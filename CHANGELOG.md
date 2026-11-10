@@ -30,8 +30,20 @@ Not tagged or published to Hex yet.
     the host app, so they will not see that app's modules.
   * Workers listed in `cron_missing.expected` are skipped so a late cron job is not
     also reported as dead.
-  * Like `:cron_missing`, this is a sequential scan of `oban_jobs` (no index on
+  * Like `:cron_missing`, the `oban_jobs` fallback is a sequential scan (no index on
     `worker` / `inserted_at`), bounded by `:statement_timeout`.
+  * Opt-in last-seen ledger (`QueueKeeperCheck.Ledger`): a tiny `(prefix, worker)`
+    table written by a telemetry handler on `[:oban, :engine, :insert_job, :stop]`
+    and `:insert_all_jobs`. Sightings are coalesced in ETS and flushed every few
+    seconds with `GREATEST`, so aggressive pruning does not require a longer
+    Pruner `max_age`. The check reads the ledger when it is present and stays
+    silent until the ledger itself has been recording for the window. Writing is
+    explicit (`Migration` + `attach`); `QueueKeeperCheck.run/2` remains read-only.
+    Optional one-time `backfill` from current `oban_jobs`.
+  * `mix queue_keeper.dead_code`: lists compiled `Oban.Worker` modules with no
+    static call sites and not in Oban/Pro crontab config. Dynamic dispatch is a
+    documented false positive. Needs the project compiled; does not start the app.
+
 
 ### Changed
 

@@ -15,20 +15,24 @@ queries on `oban_jobs` and reports nine conditions with thresholds:
 | `:discarded` | discarded-job spike for a worker (silent failures) | 5 / 3600 s | warning, critical at 2x |
 | `:cancelled` | cancelled-job spike for a worker | 10 / 3600 s | warning, critical at 2x |
 | `:cron_missing` | an expected (usually cron) worker has had no job inserted for too long | off until you list workers | always critical |
-| `:dead_workers` | a worker has had no job inserted within a window of any positive integer number of days (possible dead code). Uses `inserted_at`. Will not flag workers when finished-job history is shorter than the window | off until you set `window_days` (7, 14 and 30 are examples; 14 is the default if you only set `known` or `discover: true`) | always warning |
+| `:dead_workers` | a worker has had no job inserted within a window of any positive integer number of days (possible dead code). Uses last enqueue. Prefers the opt-in last-seen ledger when attached; otherwise reads `oban_jobs` and stays silent when history is shorter than the window | off until you set `window_days` (7, 14 and 30 are examples; 14 is the default if you only set `known` or `discover: true`) | always warning |
 
 "Due" means `available`, or `scheduled`/`retryable` whose `scheduled_at` has passed. Job `args`,
 `meta` and `errors` are never read. Nothing is sent anywhere; you decide where the report goes.
 
 ## Safety
 
-* Only `SELECT`s on `oban_jobs` (audited by a test on every engine). On Postgres each
+* `QueueKeeperCheck.run/2` only `SELECT`s (audited by a test on every engine). On Postgres each
   check runs in a transaction marked read-only, with `statement_timeout` (5 s),
   `lock_timeout` (1 s) and a per-check budget (30 s), and the transaction is always rolled
-  back. On MySQL `max_execution_time` is set for the duration of the check.
-* All queries use Oban's standard indexes except the opt-in `:cron_missing` and
-  `:dead_workers` checks (sequential scans of `oban_jobs`). On a 10M-row table a full run
-  without those two takes about 2 s.
+  back. On MySQL `max_execution_time` is set for the duration of the check. The optional
+  last-seen ledger (`QueueKeeperCheck.Ledger`) is a separate, explicit writer: it is off
+  until you run its migration and `attach/1`, and it only writes to
+  `queue_keeper_worker_sightings` / `queue_keeper_ledger_meta`, never to `oban_jobs`.
+* All queries use Oban's standard indexes except the opt-in `:cron_missing` check and the
+  `:dead_workers` fallback that scans `oban_jobs` when no ledger is present. On a 10M-row
+  table a full run without those two takes about 2 s. With the ledger, `:dead_workers` is
+  an O(workers) read.
 * `mix queue_keeper.check` and `QueueKeeperCheck.Release` start only your repo, never your
   application or Oban.
 * Database errors never raise. A check that cannot complete is reported, and the exit
@@ -47,12 +51,14 @@ Status: v0.3.0, early. The API may change before 1.0.
 > Pruner, it deletes `completed`, `cancelled` and `discarded` jobs older than `max_age`,
 > **default 60 seconds**. With that default, the 3600 s spike windows only ever see the
 > last minute, and `:cron_missing` reports any worker whose last run was pruned.
-> `:dead_workers` will not flag a worker when finished-job history is shorter than the
+> `:dead_workers` will not flag a worker when observable history is shorter than the
 > window (so a 14-day window with a 60 s Pruner stays silent, rather than calling
-> everything dead). Set the Pruner's `max_age` to at least your largest window (for
-> `:cron_missing`, longer than your longest expected gap; for `:dead_workers`, at least
-> `window_days`), e.g. `pruner: [max_age: {14, :day}]`, or shrink the check windows to fit.
-> The Pruner is only active when configured (`pruner:` key or the `Oban.Pruner` plugin).
+> everything dead). For `:dead_workers`, attach the [opt-in last-seen ledger](#dead-workers-dead-code-paths)
+> instead of raising `max_age`: some sites prune aggressively and cannot keep days of
+> `oban_jobs`. For the other history-based checks, set the Pruner's `max_age` to at least
+> your largest window (for `:cron_missing`, longer than your longest expected gap), e.g.
+> `pruner: [max_age: {14, :day}]`, or shrink those windows to fit. The Pruner is only
+> active when configured (`pruner:` key or the `Oban.Pruner` plugin).
 
 ## Engine support
 
@@ -206,10 +212,54 @@ checks `Oban.Worker` modules in loaded non-OTP applications; that needs the host
 application started, and `mix queue_keeper.check` / `QueueKeeperCheck.Release` do not
 start it.
 
-This is the other check without index support (a sequential scan, like `:cron_missing`).
-If finished-job history is shorter than the window, workers are not flagged (set
-`report_short_history: true` if you want a warning about that instead of silence). Raise
-the Pruner's `max_age` above the window, or you will never get dead-worker findings.
+**Without a ledger**, this falls back to a sequential scan of `oban_jobs` (no index on
+`worker` / `inserted_at`, like `:cron_missing`). If finished-job history is shorter than
+the window, workers are not flagged (set `report_short_history: true` if you want a
+warning about that instead of silence). Do not raise Pruner `max_age` just for this
+check; attach the ledger instead.
+
+### Last-seen ledger (recommended if you prune aggressively)
+
+Oban deletes finished jobs (default `max_age` is 60 seconds; Oban Pro's default keeps
+1,000 finished jobs). There is no leftover row to query after a prune, so a 14-day
+window cannot be observed from `oban_jobs` alone. The ledger is a tiny table, one row
+per worker, updated as jobs are inserted:
+
+```elixir
+# 1. In a host-app migration (the library never migrates your database itself)
+defmodule MyApp.Repo.Migrations.AddQueueKeeperLedger do
+  use Ecto.Migration
+  def up, do: QueueKeeperCheck.Ledger.Migration.up()
+  def down, do: QueueKeeperCheck.Ledger.Migration.down()
+end
+
+# 2. In the application supervisor, on every node that inserts jobs
+{QueueKeeperCheck.Ledger, repo: MyApp.Repo, prefix: "public", backfill: true}
+```
+
+The handler listens for `[:oban, :engine, :insert_job, :stop]` and
+`[:oban, :engine, :insert_all_jobs, :stop]`, coalesces sightings in ETS, and flushes
+one upsert per worker every 5 seconds (`GREATEST`, so multiple nodes are safe). A
+unique-insert conflict still counts as a sighting (the enqueue was attempted). Failures
+are logged and swallowed: the ledger must not break job insertion. `backfill: true` is
+an optional one-time scan of current `oban_jobs`.
+
+`:dead_workers` then reads this table (O(workers)) and stays silent until the ledger
+itself has been recording for `window_days`. A SELECT-only user used only for
+`QueueKeeperCheck.run/2` needs `SELECT` on the ledger tables; the running app's repo
+user needs `INSERT`/`UPDATE` as well.
+
+### Static scan for leftover modules
+
+`mix queue_keeper.dead_code` lists compiled `Oban.Worker` modules with no static call
+sites (`Worker.new`, `Oban.insert`, `Oban.Job.new(..., worker: ...)`, and similar) and
+not present in Oban or Oban Pro crontab config. It needs the project compiled; it does
+not start the application or Oban.
+
+A worker enqueued only through dynamic dispatch (`Module.concat`, `apply/3` on a
+string, a name from the database) will appear here even if production still runs it.
+Runtime-only Pro cron rules stored in the database are not visible; list those in
+`--ignore`. Treat the output as candidates, not proof.
 
 ## When Oban itself is down
 
@@ -263,17 +313,17 @@ Don't wire it straight to your pager. Roll it out in stages:
    for comparison.
 
 **History-based checks depend on retention.** `:stalled` (recent attempts), `:retry_storm`
-with `include_completed: true`, `:discarded`, `:cancelled`, `:cron_missing` and
-`:dead_workers` read jobs in final states, so they only see as far back as your Pruner
-keeps rows (see the Pruner caveat near the top). `:dead_workers` stays silent when that
-history is shorter than `window_days`. Prefer shrinking the check windows to fit your
-existing pruning (e.g. `discarded: [window: 60]` with the default 60 s `max_age`) over
-raising retention just for the checker: longer retention means a bigger `oban_jobs` table for
-Oban itself, which is a cost you should take on for your own reasons, not for this library.
+with `include_completed: true`, `:discarded`, `:cancelled` and `:cron_missing` read jobs
+in final states, so they only see as far back as your Pruner keeps rows (see the Pruner
+caveat near the top). Prefer shrinking those windows to fit your existing pruning (e.g.
+`discarded: [window: 60]` with the default 60 s `max_age`) over raising retention just
+for the checker. `:dead_workers` without a ledger behaves the same way (silent when
+history is short); with the ledger it does not depend on Pruner `max_age`.
 
 ## Caveats
-- Pruner window: see the caveat at the top. In short, `max_age` must cover your largest window,
-  or the windows must shrink to fit `max_age`.
+- Pruner window: see the caveat at the top. In short, for history-based checks other than
+  a ledger-backed `:dead_workers`, `max_age` must cover your largest window, or the windows
+  must shrink to fit `max_age`.
 - `:orphaned` measures execution age only (`executing` with `attempted_at` older than the
   limit). It cannot tell a job orphaned by a node crash from one that is legitimately still
   running; set the limit above your longest legitimate runtime. It overlaps with Oban's

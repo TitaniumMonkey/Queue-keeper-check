@@ -19,7 +19,7 @@ and output sanitisation.
 
 On a 10-million-row `oban_jobs` table with only Oban's standard indexes, a full run took
 **about 12 minutes on v0.1.0** and **2.2 s warm / 6.0 s with the OS page cache dropped on
-`main`** (section 8). Two opt-in checks (`:cron_missing` and `:dead_workers`) still need a sequential scan.
+`main`** (section 8). The opt-in `:cron_missing` check still needs a sequential scan, as does `:dead_workers` when no last-seen ledger is present.
 
 | ID | Severity | Finding | Status |
 |---|---|---|---|
@@ -32,8 +32,11 @@ On a 10-million-row `oban_jobs` table with only Oban's standard indexes, a full 
 | QK-07 | Low | All `executing` rows were loaded into memory in the caller (unbounded if many orphans) | Fixed (SQL aggregates) |
 | QK-08 | Info | `sample_ids` printed as a charlist (`~c"\a\b\t\n\v\f"`) when ids were small | Fixed |
 | QK-09 | Info | CI actions pinned by mutable tag; no `hex.audit`; MySQL not in CI | Fixed |
-| QK-10 | Info | `:cron_missing` and `:dead_workers` (both opt-in) need a sequential scan (no index on `worker`/`inserted_at`) | Open, documented, bounded by `statement_timeout` |
+| QK-10 | Info | `:cron_missing` and the `:dead_workers` `oban_jobs` fallback (both opt-in) need a sequential scan (no index on `worker`/`inserted_at`). The opt-in ledger path is an O(workers) `SELECT` | Open, documented, bounded by `statement_timeout` |
 | QK-11 | Info | Read-only enforcement on MySQL and SQLite depends on database grants or a read-only connection, not on the library | Open, documented and tested (section 5) |
+
+
+**Opt-in ledger writer (v0.3.0).** Default `QueueKeeperCheck.run/2` remains SELECT-only. `QueueKeeperCheck.Ledger` is a separate process you start yourself after running `QueueKeeperCheck.Ledger.Migration`. It writes only to `queue_keeper_worker_sightings` and `queue_keeper_ledger_meta` (upsert, never to `oban_jobs`). The telemetry handler is fail-open. If you do not run the migration or attach the process, there are no new writes and no new tables.
 
 ## 2. Scope and threat model
 

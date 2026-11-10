@@ -1,5 +1,11 @@
 alias QueueKeeperCheck.{LiteRepo, MyRepo, TestMigration, TestRepo}
 
+defmodule QueueKeeperCheck.LedgerTestMigration do
+  use Ecto.Migration
+  def up, do: QueueKeeperCheck.Ledger.Migration.up()
+  def down, do: QueueKeeperCheck.Ledger.Migration.down()
+end
+
 # MySQL (Dolphin engine) is opt-in because it needs a running MySQL 8.4+ server:
 #   QK_MYSQL=1 mix test
 mysql? = System.get_env("QK_MYSQL") == "1"
@@ -18,6 +24,7 @@ for {repo, adapter} <- [
   # restart the repo under the sandbox pool configured in config/test.exs.
   {:ok, pid} = repo.start_link(pool: DBConnection.ConnectionPool, pool_size: 2)
   Ecto.Migrator.up(repo, 1, TestMigration, log: false)
+  Ecto.Migrator.up(repo, 2, QueueKeeperCheck.LedgerTestMigration, log: false)
   Supervisor.stop(pid)
   {:ok, _} = repo.start_link()
   Ecto.Adapters.SQL.Sandbox.mode(repo, :manual)

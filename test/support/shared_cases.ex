@@ -939,7 +939,8 @@ defmodule QueueKeeperCheck.SharedCases do
                   [dead_workers: [ignore: "Demo.W"]],
                   [dead_workers: [known: [:atom]]],
                   [dead_workers: [overrides: %{"W" => 0}]],
-                  [dead_workers: [discover: :yes]]
+                  [dead_workers: [discover: :yes]],
+                  [dead_workers: [use_ledger: :yes]]
                 ] do
               assert_raise ArgumentError, fn -> run(bad) end
             end

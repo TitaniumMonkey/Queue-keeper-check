@@ -27,7 +27,8 @@ defmodule QueueKeeperCheck.Config do
   | `:dead_workers` | `known` | `[]` | extra worker names to check, including those with no rows at all (workers that never ran, or were fully pruned) |
   | `:dead_workers` | `overrides` | `%{}` | per-worker window in days, e.g. `%{"MyApp.YearlyClose" => 400}` |
   | `:dead_workers` | `discover` | `false` | also check `Oban.Worker` modules in loaded non-OTP applications (needs the host app started; `mix queue_keeper.check` and `Release` do not start it) |
-  | `:dead_workers` | `report_short_history` | `false` | if the window is longer than observable finished-job history, emit a warning instead of staying silent |
+  | `:dead_workers` | `report_short_history` | `false` | if the window is longer than the ledger's recording age (or, without a ledger, finished-job history), emit a warning instead of staying silent |
+  | `:dead_workers` | `use_ledger` | `true` | when the opt-in ledger tables exist and recording has started, read last-seen times from them (cheap) instead of scanning `oban_jobs`. The check itself still only SELECTs; writing to the ledger is a separate, explicit `QueueKeeperCheck.Ledger.attach/1` |
 
   `:retry_storm` counts, per worker, within the window:
 
@@ -49,12 +50,15 @@ defmodule QueueKeeperCheck.Config do
   production outage).
 
   `:dead_workers` is off until you set `window_days` (any positive integer), or you
-  set a non-empty `known` list or `discover: true`. It uses `inserted_at` (last
-  enqueue), not `attempted_at` (last execution): a worker that is still being
-  enqueued is not dead code. If the oldest finished job (`completed` / `cancelled` /
-  `discarded`) is newer than a worker's window, that worker is not flagged; a short
-  Pruner `max_age` would otherwise look like "dead". Workers listed in
-  `cron_missing.expected` are skipped so the two checks do not double-report.
+  set a non-empty `known` list or `discover: true`. It uses last enqueue, not last
+  execution: a worker that is still being enqueued is not dead code. When the
+  opt-in last-seen ledger is present (see `QueueKeeperCheck.Ledger`), activity
+  comes from that tiny table and the check stays silent until the ledger itself
+  has been recording for the window; you do not need to raise the Pruner
+  `max_age`. Without a ledger it falls back to `max(inserted_at)` on
+  `oban_jobs`, and if the oldest finished job is newer than a worker's window
+  that worker is not flagged. Workers listed in `cron_missing.expected` are
+  skipped so the two checks do not double-report.
 
   Safety options (top level, not per check):
 
@@ -84,7 +88,8 @@ defmodule QueueKeeperCheck.Config do
       known: [],
       overrides: %{},
       discover: false,
-      report_short_history: false
+      report_short_history: false,
+      use_ledger: true
     ]
   ]
 
@@ -244,13 +249,13 @@ defmodule QueueKeeperCheck.Config do
   end
 
   defp validate!(_check, key, v)
-       when key in [:include_completed, :discover, :report_short_history] do
+       when key in [:include_completed, :discover, :report_short_history, :use_ledger] do
     unless is_boolean(v),
       do: raise(ArgumentError, "#{inspect(key)} must be a boolean, got: #{inspect(v)}")
   end
 
   defp validate!(check, key, v)
-       when key not in [:include_completed, :discover, :report_short_history] do
+       when key not in [:include_completed, :discover, :report_short_history, :use_ledger] do
     unless is_integer(v) and v >= 0,
       do:
         raise(

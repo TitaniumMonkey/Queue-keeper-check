@@ -21,8 +21,11 @@ defmodule QueueKeeperCheck do
     via `cron_missing: [expected: %{"MyApp.Nightly" => 90_000}]`
   * `:dead_workers` - a worker has had no job inserted within a window of any positive
     integer number of days (possible dead code). Opt-in via `dead_workers: [window_days: 14]`
-    (7, 14 and 30 are examples, not a limit). Always a warning. Uses `inserted_at`, and will
-    not flag workers when finished-job history is shorter than the window
+    (7, 14 and 30 are examples, not a limit). Always a warning. Uses last enqueue
+    (`inserted_at`). When the opt-in last-seen ledger is attached, that is the source of
+    truth and the check stays silent until the ledger has been recording for the window
+    (no need to raise the Pruner `max_age`). Otherwise it falls back to `oban_jobs` and
+    will not flag workers when finished-job history is shorter than the window
 
   Options: any check name with a keyword list of thresholds, plus
 
