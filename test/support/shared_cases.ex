@@ -481,6 +481,192 @@ defmodule QueueKeeperCheck.SharedCases do
         assert report.status == :critical
       end
 
+      test "dead_workers: off by default even when old workers sit in a deep history" do
+        insert(worker: "Demo.Active", inserted_at: ago(60))
+
+        insert(
+          worker: "Demo.Dead",
+          inserted_at: ago(20 * 86_400),
+          completed_at: ago(20 * 86_400)
+        )
+
+        insert(
+          worker: "Demo.Ancient",
+          inserted_at: ago(20 * 86_400),
+          completed_at: ago(20 * 86_400)
+        )
+
+        assert only(run(), :dead_workers) == []
+      end
+
+      test "dead_workers: any positive integer window_days; flags last insert older than the window" do
+        insert(worker: "Demo.Active", inserted_at: ago(60), completed_at: ago(50))
+        # enough finished history for a 14-day (and a 1-day) window
+        insert(
+          worker: "Demo.Active",
+          inserted_at: ago(20 * 86_400),
+          completed_at: ago(20 * 86_400)
+        )
+
+        %{id: id} =
+          insert(
+            worker: "Demo.Dead",
+            inserted_at: ago(14 * 86_400 + 1),
+            completed_at: ago(14 * 86_400 + 1)
+          )
+
+        # exactly 14 days is not older than the window
+        insert(
+          worker: "Demo.Edge",
+          inserted_at: ago(14 * 86_400),
+          completed_at: ago(14 * 86_400)
+        )
+
+        assert only(run(), :dead_workers) == []
+
+        report = run(dead_workers: [window_days: 14])
+        window = 14 * 86_400
+
+        assert [
+                 %Finding{
+                   check: :dead_workers,
+                   severity: :warning,
+                   worker: "Demo.Dead",
+                   value: 1_209_601,
+                   threshold: ^window,
+                   job_ids: [^id]
+                 }
+               ] = only(report, :dead_workers)
+
+        assert report.status == :warning
+
+        # a 1-day window is a valid positive integer and flags a 2-day-old worker
+        insert(
+          worker: "Demo.Yesterday",
+          inserted_at: ago(2 * 86_400),
+          completed_at: ago(2 * 86_400)
+        )
+
+        workers =
+          run(dead_workers: [window_days: 1])
+          |> only(:dead_workers)
+          |> Enum.map(& &1.worker)
+          |> Enum.sort()
+
+        assert "Demo.Dead" in workers
+        assert "Demo.Yesterday" in workers
+        assert "Demo.Edge" in workers
+        refute "Demo.Active" in workers
+
+        # 90 days is also valid; finished history is only 20 days, so nothing is flagged
+        assert only(run(dead_workers: [window_days: 90]), :dead_workers) == []
+      end
+
+      test "dead_workers: will not claim a worker is dead when history is shorter than the window" do
+        # An old in-flight job would look dead if we ignored retention: the recent
+        # completed row of the same worker can be pruned, leaving only the old one.
+        insert(
+          state: "available",
+          worker: "Demo.StillUsed",
+          inserted_at: ago(20 * 86_400),
+          scheduled_at: ago(20 * 86_400),
+          attempted_at: nil,
+          completed_at: nil
+        )
+
+        insert(worker: "Demo.Recent", inserted_at: ago(60), completed_at: ago(50))
+
+        assert only(run(dead_workers: [window_days: 14]), :dead_workers) == []
+
+        report =
+          run(dead_workers: [window_days: 14, report_short_history: true])
+
+        window = 14 * 86_400
+
+        assert [
+                 %Finding{
+                   check: :dead_workers,
+                   severity: :warning,
+                   worker: nil,
+                   value: 60,
+                   threshold: ^window
+                 }
+               ] = only(report, :dead_workers)
+
+        assert hd(only(report, :dead_workers)).message =~ "exceeds observable"
+      end
+
+      test "dead_workers: ignore, known, overrides, discover, and cron_missing skip" do
+        insert(worker: "Demo.Active", inserted_at: ago(60), completed_at: ago(50))
+
+        insert(
+          worker: "Demo.Active",
+          inserted_at: ago(20 * 86_400),
+          completed_at: ago(20 * 86_400)
+        )
+
+        insert(
+          worker: "Demo.Ignored",
+          inserted_at: ago(20 * 86_400),
+          completed_at: ago(20 * 86_400)
+        )
+
+        insert(
+          worker: "Demo.Monthly",
+          inserted_at: ago(20 * 86_400),
+          completed_at: ago(20 * 86_400)
+        )
+
+        insert(
+          worker: "Demo.CronExpected",
+          inserted_at: ago(20 * 86_400),
+          completed_at: ago(20 * 86_400)
+        )
+
+        report =
+          run(
+            dead_workers: [
+              window_days: 14,
+              ignore: ["Demo.Ignored"],
+              overrides: %{"Demo.Monthly" => 40},
+              known: ["Demo.NeverSeen"],
+              discover: true
+            ],
+            cron_missing: [expected: %{"Demo.CronExpected" => 90_000}]
+          )
+
+        dead = only(report, :dead_workers)
+        names = dead |> Enum.map(& &1.worker) |> Enum.sort()
+
+        refute "Demo.Ignored" in names
+        refute "Demo.Monthly" in names
+        refute "Demo.CronExpected" in names
+        refute "Demo.Active" in names
+        assert "Demo.NeverSeen" in names
+        assert "QueueKeeperCheck.DeadTestWorker" in names
+
+        never = Enum.find(dead, &(&1.worker == "Demo.NeverSeen"))
+        assert never.value == nil
+        assert never.job_ids == []
+        assert never.severity == :warning
+        assert never.count == 0
+
+        # Monthly is not flagged at 14 days because of the 40-day override; at a 1-day
+        # override-equivalent we already have 20 days of history, so a 15-day override still skips.
+        assert only(
+                 run(
+                   dead_workers: [
+                     window_days: 14,
+                     overrides: %{"Demo.Monthly" => 15},
+                     ignore: ["Demo.Ignored", "Demo.CronExpected"]
+                   ]
+                 ),
+                 :dead_workers
+               )
+               |> Enum.map(& &1.worker)
+               |> Enum.sort() == ["Demo.Monthly"]
+      end
+
       test "Release.check returns the report and exit code without halting" do
         insert_many(6,
           state: "discarded",
@@ -581,12 +767,31 @@ defmodule QueueKeeperCheck.SharedCases do
               )
 
         insert(Map.merge(secret, %{worker: "Demo.Hourly", inserted_at: ago(5_000)}))
+
+        insert(
+          Map.merge(secret, %{
+            worker: "Demo.Ancient",
+            inserted_at: ago(20 * 86_400),
+            scheduled_at: ago(20 * 86_400),
+            completed_at: ago(20 * 86_400)
+          })
+        )
+
+        insert(
+          Map.merge(secret, %{
+            worker: "Demo.Dead",
+            inserted_at: ago(20 * 86_400),
+            scheduled_at: ago(20 * 86_400),
+            completed_at: ago(20 * 86_400)
+          })
+        )
       end
 
       @all_opts [
         hanging: [default_budget: 300, budgets: %{"Demo.Video" => 600}],
         retry_storm: [min_retries: 3, include_completed: true],
-        cron_missing: [expected: %{"Demo.Hourly" => 3_900, "Demo.Never" => 60}]
+        cron_missing: [expected: %{"Demo.Hourly" => 3_900, "Demo.Never" => 60}],
+        dead_workers: [window_days: 14]
       ]
 
       defp capture_sql(fun) do
@@ -725,7 +930,16 @@ defmodule QueueKeeperCheck.SharedCases do
                   [statement_timeout: 0],
                   [lock_timeout: "1s"],
                   [read_only: :yes],
-                  [typo: 1]
+                  [typo: 1],
+                  [dead_workers: [window_days: 0]],
+                  [dead_workers: [window_days: -1]],
+                  [dead_workers: [window_days: 14.0]],
+                  [dead_workers: [window_days: "14"]],
+                  [dead_workers: [window_days: [7, 14, 30]]],
+                  [dead_workers: [ignore: "Demo.W"]],
+                  [dead_workers: [known: [:atom]]],
+                  [dead_workers: [overrides: %{"W" => 0}]],
+                  [dead_workers: [discover: :yes]]
                 ] do
               assert_raise ArgumentError, fn -> run(bad) end
             end

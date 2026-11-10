@@ -22,6 +22,12 @@ defmodule QueueKeeperCheck.Config do
   | `:discarded` | `window` / `max` | 3600 / 5 | jobs discarded in the window, per worker |
   | `:cancelled` | `window` / `max` | 3600 / 10 | jobs cancelled in the window, per worker |
   | `:cron_missing` | `expected` | `%{}` (off) | worker => max seconds between insertions, e.g. `%{"MyApp.Nightly" => 90_000}` |
+  | `:dead_workers` | `window_days` | `nil` (off) | any positive integer number of days since a worker was last *inserted* (enqueued). 7, 14 and 30 are common examples; if you set `known` or `discover: true` without `window_days`, the window is 14. There is no fixed set of allowed values |
+  | `:dead_workers` | `ignore` | `[]` | worker names to skip (rare/seasonal jobs, or ones you have reviewed) |
+  | `:dead_workers` | `known` | `[]` | extra worker names to check, including those with no rows at all (workers that never ran, or were fully pruned) |
+  | `:dead_workers` | `overrides` | `%{}` | per-worker window in days, e.g. `%{"MyApp.YearlyClose" => 400}` |
+  | `:dead_workers` | `discover` | `false` | also check `Oban.Worker` modules in loaded non-OTP applications (needs the host app started; `mix queue_keeper.check` and `Release` do not start it) |
+  | `:dead_workers` | `report_short_history` | `false` | if the window is longer than observable finished-job history, emit a warning instead of staying silent |
 
   `:retry_storm` counts, per worker, within the window:
 
@@ -38,7 +44,17 @@ defmodule QueueKeeperCheck.Config do
   counted. (Up to v0.2.0 every `retryable` job counted, whatever the window.)
 
   A finding is `:critical` when the value is at least twice its threshold; `:orphaned`,
-  `:stalled` and `:cron_missing` findings are always `:critical`.
+  `:stalled` and `:cron_missing` findings are always `:critical`. `:dead_workers`
+  findings are always `:warning` (they are a hint about possible dead code, not a
+  production outage).
+
+  `:dead_workers` is off until you set `window_days` (any positive integer), or you
+  set a non-empty `known` list or `discover: true`. It uses `inserted_at` (last
+  enqueue), not `attempted_at` (last execution): a worker that is still being
+  enqueued is not dead code. If the oldest finished job (`completed` / `cancelled` /
+  `discarded`) is newer than a worker's window, that worker is not flagged; a short
+  Pruner `max_age` would otherwise look like "dead". Workers listed in
+  `cron_missing.expected` are skipped so the two checks do not double-report.
 
   Safety options (top level, not per check):
 
@@ -61,7 +77,15 @@ defmodule QueueKeeperCheck.Config do
     retry_storm: [window: 300, min_retries: 20, include_completed: false],
     discarded: [window: 3600, max: 5],
     cancelled: [window: 3600, max: 10],
-    cron_missing: [expected: %{}]
+    cron_missing: [expected: %{}],
+    dead_workers: [
+      window_days: nil,
+      ignore: [],
+      known: [],
+      overrides: %{},
+      discover: false,
+      report_short_history: false
+    ]
   ]
 
   @guard_defaults [
@@ -186,9 +210,47 @@ defmodule QueueKeeperCheck.Config do
         )
   end
 
-  defp validate!(_check, :include_completed, v) when is_boolean(v), do: :ok
+  defp validate!(:dead_workers, :window_days, nil), do: :ok
 
-  defp validate!(check, key, v) when key != :include_completed do
+  defp validate!(:dead_workers, :window_days, v) do
+    unless is_integer(v) and v >= 1,
+      do:
+        raise(
+          ArgumentError,
+          "dead_workers :window_days must be a positive integer (days), got: #{inspect(v)}"
+        )
+  end
+
+  defp validate!(_check, key, list) when key in [:ignore, :known] do
+    unless is_list(list) and Enum.all?(list, &is_binary/1),
+      do:
+        raise(
+          ArgumentError,
+          "#{inspect(key)} must be a list of worker name strings, got: #{inspect(list)}"
+        )
+  end
+
+  defp validate!(_check, :overrides, map) do
+    valid =
+      is_map(map) and
+        Enum.all?(map, fn {w, d} -> is_binary(w) and is_integer(d) and d >= 1 end)
+
+    unless valid,
+      do:
+        raise(
+          ArgumentError,
+          "overrides must be a map of worker name (string) => positive integer days, got: #{inspect(map)}"
+        )
+  end
+
+  defp validate!(_check, key, v)
+       when key in [:include_completed, :discover, :report_short_history] do
+    unless is_boolean(v),
+      do: raise(ArgumentError, "#{inspect(key)} must be a boolean, got: #{inspect(v)}")
+  end
+
+  defp validate!(check, key, v)
+       when key not in [:include_completed, :discover, :report_short_history] do
     unless is_integer(v) and v >= 0,
       do:
         raise(

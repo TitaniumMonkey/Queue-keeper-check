@@ -6,6 +6,38 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-10
+
+Not tagged or published to Hex yet.
+
+### Added
+
+- `:dead_workers` (opt-in): report workers that have had no job inserted within a
+  window of any positive integer number of days (`window_days`). 7, 14 and 30 are
+  documented examples, not a restricted set; if you set `known` or `discover: true`
+  without `window_days`, the window is 14. Findings are always `:warning`.
+  * Last activity is `max(inserted_at)` per worker in any state (last enqueue, not last
+    execution), so a worker that is still being inserted is not treated as dead code.
+  * If observable finished-job history (`min(inserted_at)` among `completed` /
+    `cancelled` / `discarded` rows) is shorter than a worker's window, that worker is
+    not flagged, to avoid calling a recently used worker dead after the Pruner deleted
+    its rows. Set `report_short_history: true` to emit a warning about the short history
+    instead of staying silent.
+  * `ignore` skips named workers, `overrides` sets a per-worker window in days, and
+    `known` lists extra workers to check even when they have no rows at all.
+  * Optional `discover: true` also checks `Oban.Worker` modules in loaded non-OTP
+    applications; `mix queue_keeper.check` and `QueueKeeperCheck.Release` do not start
+    the host app, so they will not see that app's modules.
+  * Workers listed in `cron_missing.expected` are skipped so a late cron job is not
+    also reported as dead.
+  * Like `:cron_missing`, this is a sequential scan of `oban_jobs` (no index on
+    `worker` / `inserted_at`), bounded by `:statement_timeout`.
+
+### Changed
+
+- The documented Hex dependency version is `~> 0.3.0`. Do not publish or tag until
+  this release is reviewed.
+
 ## [0.2.1] - 2026-10-22
 
 First release published to Hex.
@@ -100,6 +132,7 @@ Initial implementation. Not tagged, released or published; superseded by 0.2.0.
 - Support for Oban's Basic (PostgreSQL), Lite (SQLite3) and Dolphin (MySQL 8.4+) engines.
 
 [Unreleased]: https://github.com/TitaniumMonkey/Queue-keeper-check/compare/v0.2.1...HEAD
+[0.3.0]: https://github.com/TitaniumMonkey/Queue-keeper-check/compare/v0.2.1...HEAD
 [0.2.1]: https://github.com/TitaniumMonkey/Queue-keeper-check/releases/tag/v0.2.1
 [0.2.0]: https://github.com/TitaniumMonkey/Queue-keeper-check/releases/tag/v0.2.0
 [0.1.0]: https://github.com/TitaniumMonkey/Queue-keeper-check/commit/48b75a1

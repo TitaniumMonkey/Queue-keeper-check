@@ -19,7 +19,7 @@ and output sanitisation.
 
 On a 10-million-row `oban_jobs` table with only Oban's standard indexes, a full run took
 **about 12 minutes on v0.1.0** and **2.2 s warm / 6.0 s with the OS page cache dropped on
-`main`** (section 8). One opt-in check (`:cron_missing`) still needs a sequential scan.
+`main`** (section 8). Two opt-in checks (`:cron_missing` and `:dead_workers`) still need a sequential scan.
 
 | ID | Severity | Finding | Status |
 |---|---|---|---|
@@ -32,7 +32,7 @@ On a 10-million-row `oban_jobs` table with only Oban's standard indexes, a full 
 | QK-07 | Low | All `executing` rows were loaded into memory in the caller (unbounded if many orphans) | Fixed (SQL aggregates) |
 | QK-08 | Info | `sample_ids` printed as a charlist (`~c"\a\b\t\n\v\f"`) when ids were small | Fixed |
 | QK-09 | Info | CI actions pinned by mutable tag; no `hex.audit`; MySQL not in CI | Fixed |
-| QK-10 | Info | `:cron_missing` (opt-in) needs a sequential scan (no index on `worker`/`inserted_at`) | Open, documented, bounded by `statement_timeout` |
+| QK-10 | Info | `:cron_missing` and `:dead_workers` (both opt-in) need a sequential scan (no index on `worker`/`inserted_at`) | Open, documented, bounded by `statement_timeout` |
 | QK-11 | Info | Read-only enforcement on MySQL and SQLite depends on database grants or a read-only connection, not on the library | Open, documented and tested (section 5) |
 
 ## 2. Scope and threat model
@@ -276,7 +276,7 @@ was not re-measured.
 AND attempted_at >= ...`) and the `stalled` activity query were sequential scans. By
 code reading, the latter also ran when there were no late queues.
 
-**Plans on `main`:** every statement uses an index except `:cron_missing` (sequential
+**Plans on `main`:** every statement uses an index except `:cron_missing` and `:dead_workers` (sequential
 scan, 0.5 s warm). With an optional, application-owned index
 `CREATE INDEX CONCURRENTLY ... ON oban_jobs (worker, inserted_at)` the same query took
 118 ms ([`pg_cron_missing_with_optional_index.txt`](https://github.com/TitaniumMonkey/Queue-keeper-check/blob/v0.2.0/docs/evidence/perf/pg_cron_missing_with_optional_index.txt));
@@ -309,7 +309,7 @@ mix, same box):**
 
 Both engines have only the composite `(state, queue, priority, scheduled_at, id)` index
 from Oban, so discarded/cancelled windows are read through the state prefix. In
-`EXPLAIN ANALYZE` / `EXPLAIN QUERY PLAN`, every statement except `:cron_missing` used
+`EXPLAIN ANALYZE` / `EXPLAIN QUERY PLAN`, every statement except `:cron_missing` and `:dead_workers` used
 that index ([`mysql_explain.txt`](https://github.com/TitaniumMonkey/Queue-keeper-check/blob/v0.2.0/docs/evidence/perf/mysql_explain.txt),
 [`sqlite_explain.txt`](https://github.com/TitaniumMonkey/Queue-keeper-check/blob/v0.2.0/docs/evidence/perf/sqlite_explain.txt)). The roughly 90 ms floor per
 check on MySQL was not investigated further.
@@ -375,7 +375,7 @@ The README installs from GitHub. A git tag can be moved, so pin a commit with
 
 ## 11. Residual risks and limitations
 
-* **`:cron_missing` costs a sequential scan** on all engines (QK-10). It is opt-in and
+* **`:cron_missing` and `:dead_workers` cost a sequential scan** on all engines (QK-10). They are opt-in and
   bounded by `statement_timeout`; a timeout makes it report an error, not a false "ok".
   If you enable it on a large table, consider your own `(worker, inserted_at)` index.
 * **MySQL and SQLite read-only enforcement** relies on grants or `mode: :readonly`
@@ -427,7 +427,7 @@ The README installs from GitHub. A git tag can be moved, so pin a commit with
    ```
 
    Look at the reported durations in your database's slow-query log or
-   `pg_stat_statements`. If `:cron_missing` is enabled, check its sequential scan cost.
+   `pg_stat_statements`. If `:cron_missing` or `:dead_workers` is enabled, check its sequential scan cost.
 4. **Keep the defaults or tighten them:** `statement_timeout: 5_000`,
    `lock_timeout: 1_000`, `check_timeout: 30_000`, `read_only: true`. Leave
    `retry_storm: [include_completed: false]` on large tables.

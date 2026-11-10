@@ -5,7 +5,7 @@ defmodule QueueKeeperCheck do
       report = QueueKeeperCheck.run(MyApp.Repo)
       IO.puts(QueueKeeperCheck.format(report))
 
-  Detects eight conditions (see `checks/0` and `QueueKeeperCheck.Config` for thresholds):
+  Detects nine conditions (see `checks/0` and `QueueKeeperCheck.Config` for thresholds):
 
   * `:orphaned` - jobs `executing` far longer than any job should run (execution age only;
     possibly orphaned by a node crash)
@@ -19,6 +19,10 @@ defmodule QueueKeeperCheck do
   * `:cancelled` - spike of cancelled jobs
   * `:cron_missing` - an expected (cron) worker has had no job inserted for too long; opt-in
     via `cron_missing: [expected: %{"MyApp.Nightly" => 90_000}]`
+  * `:dead_workers` - a worker has had no job inserted within a window of any positive
+    integer number of days (possible dead code). Opt-in via `dead_workers: [window_days: 14]`
+    (7, 14 and 30 are examples, not a limit). Always a warning. Uses `inserted_at`, and will
+    not flag workers when finished-job history is shorter than the window
 
   Options: any check name with a keyword list of thresholds, plus
 
@@ -44,7 +48,8 @@ defmodule QueueKeeperCheck do
     :retry_storm,
     :discarded,
     :cancelled,
-    :cron_missing
+    :cron_missing,
+    :dead_workers
   ]
 
   @doc "All check names, in the order they run."

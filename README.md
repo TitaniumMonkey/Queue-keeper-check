@@ -3,7 +3,7 @@
 [![CI](https://github.com/TitaniumMonkey/Queue-keeper-check/actions/workflows/ci.yml/badge.svg)](https://github.com/TitaniumMonkey/Queue-keeper-check/actions/workflows/ci.yml)
 
 Read-only health check for [Oban](https://github.com/oban-bg/oban) queues. It runs aggregate
-queries on `oban_jobs` and reports eight conditions with thresholds:
+queries on `oban_jobs` and reports nine conditions with thresholds:
 
 | Check | Fires when | Default threshold | Severity |
 |---|---|---|---|
@@ -15,6 +15,7 @@ queries on `oban_jobs` and reports eight conditions with thresholds:
 | `:discarded` | discarded-job spike for a worker (silent failures) | 5 / 3600 s | warning, critical at 2x |
 | `:cancelled` | cancelled-job spike for a worker | 10 / 3600 s | warning, critical at 2x |
 | `:cron_missing` | an expected (usually cron) worker has had no job inserted for too long | off until you list workers | always critical |
+| `:dead_workers` | a worker has had no job inserted within a window of any positive integer number of days (possible dead code). Uses `inserted_at`. Will not flag workers when finished-job history is shorter than the window | off until you set `window_days` (7, 14 and 30 are examples; 14 is the default if you only set `known` or `discover: true`) | always warning |
 
 "Due" means `available`, or `scheduled`/`retryable` whose `scheduled_at` has passed. Job `args`,
 `meta` and `errors` are never read. Nothing is sent anywhere; you decide where the report goes.
@@ -25,8 +26,9 @@ queries on `oban_jobs` and reports eight conditions with thresholds:
   check runs in a transaction marked read-only, with `statement_timeout` (5 s),
   `lock_timeout` (1 s) and a per-check budget (30 s), and the transaction is always rolled
   back. On MySQL `max_execution_time` is set for the duration of the check.
-* All queries use Oban's standard indexes except the opt-in `:cron_missing` (a sequential
-  scan). On a 10M-row table a full run takes about 2 s.
+* All queries use Oban's standard indexes except the opt-in `:cron_missing` and
+  `:dead_workers` checks (sequential scans of `oban_jobs`). On a 10M-row table a full run
+  without those two takes about 2 s.
 * `mix queue_keeper.check` and `QueueKeeperCheck.Release` start only your repo, never your
   application or Oban.
 * Database errors never raise. A check that cannot complete is reported, and the exit
@@ -37,16 +39,19 @@ See [docs/SECURITY_REVIEW.md](docs/SECURITY_REVIEW.md) for the exact SQL, requir
 privileges, measurements and findings, and [SECURITY.md](SECURITY.md) to report a
 vulnerability.
 
-Status: v0.2.1, early. The API may change before 1.0.
+Status: v0.3.0, early. The API may change before 1.0.
 
-> **Pruner caveat (read this first).** Five checks count rows in final states: `:stalled`
-> (recent `attempted_at`), `:retry_storm` (with `include_completed: true`),
-> `:discarded`, `:cancelled` and `:cron_missing`. If you run Oban's Pruner, it deletes
-> `completed`, `cancelled` and `discarded` jobs older than `max_age`, **default 60 seconds**.
-> With that default, the 3600 s spike windows only ever see the last minute, and
-> `:cron_missing` reports any worker whose last run was pruned. Set the Pruner's `max_age`
-> to at least your largest window (for `:cron_missing`, longer than your longest expected
-> gap), e.g. `pruner: [max_age: {1, :day}]`, or shrink the check windows to fit.
+> **Pruner caveat (read this first).** Several checks depend on rows in final states:
+> `:stalled` (recent `attempted_at`), `:retry_storm` (with `include_completed: true`),
+> `:discarded`, `:cancelled`, `:cron_missing` and `:dead_workers`. If you run Oban's
+> Pruner, it deletes `completed`, `cancelled` and `discarded` jobs older than `max_age`,
+> **default 60 seconds**. With that default, the 3600 s spike windows only ever see the
+> last minute, and `:cron_missing` reports any worker whose last run was pruned.
+> `:dead_workers` will not flag a worker when finished-job history is shorter than the
+> window (so a 14-day window with a 60 s Pruner stays silent, rather than calling
+> everything dead). Set the Pruner's `max_age` to at least your largest window (for
+> `:cron_missing`, longer than your longest expected gap; for `:dead_workers`, at least
+> `window_days`), e.g. `pruner: [max_age: {14, :day}]`, or shrink the check windows to fit.
 > The Pruner is only active when configured (`pruner:` key or the `Oban.Pruner` plugin).
 
 ## Engine support
@@ -89,13 +94,13 @@ Add the dependency to `mix.exs`:
 ```elixir
 def deps do
   [
-    {:queue_keeper_check, "~> 0.2.1"}
+    {:queue_keeper_check, "~> 0.3.0"}
   ]
 end
 ```
 
 Hex packages are checksummed in `mix.lock`. Or straight from GitHub, pinned to the release
-tag (`tag: "v0.2.1"`); git tags can be moved, so for an immutable git pin use
+tag (`tag: "v0.3.0"`); git tags can be moved, so for an immutable git pin use
 `ref: "<commit sha>"`.
 
 Your app already brings its own database adapter (`postgrex`, `ecto_sqlite3` or `myxql`).
@@ -177,6 +182,35 @@ QueueKeeperCheck.run(MyApp.Repo,
 It looks at the newest row for each worker in any state, so it needs the Pruner to keep
 rows longer than the gap (see the caveat above).
 
+### Dead workers (dead code paths)
+
+Set `window_days` to any positive integer (days). 7, 14 and 30 are common starting
+points, not a limited set of values. The check looks at the newest `inserted_at` for each
+worker in any state, so a worker that is still being enqueued is not reported even if it
+has not executed recently.
+
+```elixir
+QueueKeeperCheck.run(MyApp.Repo,
+  dead_workers: [
+    window_days: 14,
+    ignore: ["MyApp.YearlyClose"],
+    overrides: %{"MyApp.MonthlyReport" => 40},
+    known: ["MyApp.Workers.LegacyImport"]
+  ]
+)
+```
+
+Findings are always `:warning`. Workers listed in `cron_missing.expected` are skipped, so
+a late cron job is reported as missing, not as dead. Optional `discover: true` also
+checks `Oban.Worker` modules in loaded non-OTP applications; that needs the host
+application started, and `mix queue_keeper.check` / `QueueKeeperCheck.Release` do not
+start it.
+
+This is the other check without index support (a sequential scan, like `:cron_missing`).
+If finished-job history is shorter than the window, workers are not flagged (set
+`report_short_history: true` if you want a warning about that instead of silence). Raise
+the Pruner's `max_age` above the window, or you will never get dead-worker findings.
+
 ## When Oban itself is down
 
 If Oban isn't running (crash loop, bad config, broken leadership, a deploy that never
@@ -229,9 +263,10 @@ Don't wire it straight to your pager. Roll it out in stages:
    for comparison.
 
 **History-based checks depend on retention.** `:stalled` (recent attempts), `:retry_storm`
-with `include_completed: true`, `:discarded`, `:cancelled` and `:cron_missing` read jobs in
-final states, so they only see as far back as your Pruner keeps rows (see the Pruner
-caveat near the top). Prefer shrinking the check windows to fit your
+with `include_completed: true`, `:discarded`, `:cancelled`, `:cron_missing` and
+`:dead_workers` read jobs in final states, so they only see as far back as your Pruner
+keeps rows (see the Pruner caveat near the top). `:dead_workers` stays silent when that
+history is shorter than `window_days`. Prefer shrinking the check windows to fit your
 existing pruning (e.g. `discarded: [window: 60]` with the default 60 s `max_age`) over
 raising retention just for the checker: longer retention means a bigger `oban_jobs` table for
 Oban itself, which is a cost you should take on for your own reasons, not for this library.

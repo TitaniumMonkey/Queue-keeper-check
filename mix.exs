@@ -1,7 +1,7 @@
 defmodule QueueKeeperCheck.MixProject do
   use Mix.Project
 
-  @version "0.2.1"
+  @version "0.3.0"
   @source_url "https://github.com/TitaniumMonkey/Queue-keeper-check"
 
   def project do
@@ -14,7 +14,8 @@ defmodule QueueKeeperCheck.MixProject do
       deps: deps(),
       description:
         "Read-only health check for Oban queues: orphaned, hanging, backed-up and stalled queues, " <>
-          "retry storms, discard/cancel spikes and missing cron jobs. Postgres, SQLite and MySQL.",
+          "retry storms, discard/cancel spikes, missing cron jobs and dead workers. " <>
+          "Postgres, SQLite and MySQL.",
       package: package(),
       docs: docs(),
       source_url: @source_url,

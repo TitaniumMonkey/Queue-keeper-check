@@ -395,6 +395,154 @@ defmodule QueueKeeperCheck.Checks do
     end
   end
 
+  # -- dead workers (dead code paths) ----------------------------------------------------
+  # Opt-in: set `window_days` to any positive integer (7, 14 and 30 are common examples;
+  # if you only set `known` or `discover: true`, the window defaults to 14). Last activity
+  # is `max(inserted_at)` per worker in any state: a worker still being enqueued is not
+  # dead, even if it has not executed recently.
+  #
+  # The Pruner deletes finished jobs older than `max_age`. If the oldest finished row
+  # (`completed` / `cancelled` / `discarded`) is newer than a worker's window, that
+  # worker is not flagged: a short retention would otherwise look like "dead".
+  # Set `report_short_history: true` to emit a warning in that case.
+  #
+  # Cost: `worker` and `inserted_at` are not indexed by Oban, so this is a sequential
+  # scan of oban_jobs, like `:cron_missing`, bounded by `statement_timeout`.
+
+  @default_dead_window_days 14
+  @seconds_per_day 86_400
+
+  def dead_workers(repo, cfg, now, qopts) do
+    uw = cfg[:dead_workers]
+    window_days = uw[:window_days]
+    known = uw[:known]
+    discover? = uw[:discover]
+
+    if not (is_integer(window_days) or known != [] or discover?) do
+      []
+    else
+      dead_workers_run(repo, cfg, now, qopts, window_days || @default_dead_window_days)
+    end
+  end
+
+  defp dead_workers_run(repo, cfg, now, qopts, default_days) do
+    uw = cfg[:dead_workers]
+
+    skip =
+      MapSet.new(uw[:ignore])
+      |> MapSet.union(MapSet.new(Map.keys(cfg[:cron_missing][:expected])))
+
+    candidates =
+      uw[:known]
+      |> Enum.concat(if(uw[:discover], do: discovered_workers(), else: []))
+      |> Enum.uniq()
+
+    oldest_finished =
+      from(j in Job,
+        where: j.state in ["completed", "cancelled", "discarded"],
+        select: type(min(j.inserted_at), :utc_datetime_usec)
+      )
+      |> repo.one(qopts)
+
+    history_secs = if oldest_finished, do: age(oldest_finished, now), else: 0
+
+    latest =
+      from(j in Job,
+        group_by: j.worker,
+        select: {j.worker, type(max(j.inserted_at), :utc_datetime_usec), max(j.id), count(j.id)}
+      )
+      |> repo.all(qopts)
+      |> Map.new(fn {w, at, id, n} -> {w, {at, id, n}} end)
+
+    workers =
+      latest
+      |> Map.keys()
+      |> Enum.concat(candidates)
+      |> Enum.uniq()
+      |> Enum.reject(&MapSet.member?(skip, &1))
+      |> Enum.sort()
+
+    findings =
+      for worker <- workers,
+          days = Map.get(uw[:overrides], worker, default_days),
+          window_secs = days * @seconds_per_day,
+          history_secs >= window_secs,
+          {at, id, n} = Map.get(latest, worker, {nil, nil, 0}),
+          is_nil(at) or age(at, now) > window_secs do
+        {value, detail} =
+          if at,
+            do: {age(at, now), "last inserted #{age(at, now)}s ago"},
+            else: {nil, "no rows at all (never inserted, or pruned)"}
+
+        %Finding{
+          check: :dead_workers,
+          severity: :warning,
+          worker: worker,
+          count: n,
+          value: value,
+          threshold: window_secs,
+          job_ids: List.wrap(id),
+          message:
+            "#{worker} has had no job inserted within #{days} days (#{window_secs}s): #{detail}. " <>
+              "This may be dead code; add the worker to dead_workers ignore, or a " <>
+              "longer per-worker override, if it is meant to run rarely."
+        }
+      end
+
+    if uw[:report_short_history] and history_secs < default_days * @seconds_per_day do
+      threshold = default_days * @seconds_per_day
+      history_desc = if oldest_finished, do: "#{history_secs}s", else: "no finished rows"
+
+      [
+        %Finding{
+          check: :dead_workers,
+          severity: :warning,
+          count: 0,
+          value: history_secs,
+          threshold: threshold,
+          message:
+            "dead_workers window (#{default_days} days / #{threshold}s) exceeds observable " <>
+              "finished-job history (#{history_desc}). Cannot determine dead workers without " <>
+              "false positives. Raise the Pruner max_age to at least #{default_days} days, or " <>
+              "shrink window_days."
+        }
+        | findings
+      ]
+    else
+      findings
+    end
+  end
+
+  defp discovered_workers do
+    otp_root = :code.root_dir() |> List.to_string()
+
+    for {app, _, _} <- Application.loaded_applications(),
+        lib_dir = :code.lib_dir(app),
+        is_list(lib_dir),
+        not String.starts_with?(List.to_string(lib_dir), otp_root),
+        modules when is_list(modules) <- [Application.spec(app, :modules)],
+        mod <- modules,
+        match?({:module, _}, Code.ensure_loaded(mod)),
+        function_exported?(mod, :perform, 1),
+        function_exported?(mod, :__opts__, 0),
+        worker_module?(mod),
+        do: module_worker_name(mod)
+  end
+
+  defp worker_module?(mod) do
+    opts = mod.__opts__()
+    is_list(opts) and Keyword.has_key?(opts, :queue)
+  rescue
+    _ -> false
+  end
+
+  defp module_worker_name(mod) do
+    case Atom.to_string(mod) do
+      "Elixir." <> rest -> rest
+      name -> name
+    end
+  end
+
   defp grouped_by_worker(repo, base, qopts) do
     base
     |> group_by([j], [j.worker, j.queue])
