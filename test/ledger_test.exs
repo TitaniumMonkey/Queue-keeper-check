@@ -265,6 +265,136 @@ defmodule QueueKeeperCheck.LedgerPostgresTest do
     refute "Demo.StillUsed" in Enum.map(sql_report.findings, & &1.worker)
   end
 
+  @tag :qk041
+  test "ledger ignores another repository's telemetry, even with the same prefix", %{
+    ledger: ledger
+  } do
+    emit_insert_job(ledger, "Argus.Local", @now, 1)
+
+    Ledger.handle_event(
+      [:oban, :engine, :insert_job, :stop],
+      %{duration: 1},
+      %{
+        conf: %{name: Oban, prefix: @prefix, repo: QueueKeeperCheck.LiteRepo},
+        job: %Oban.Job{id: 2, worker: "Argus.Foreign", inserted_at: @now, conflict?: false}
+      },
+      ledger
+    )
+
+    Ledger.handle_event(
+      [:oban, :engine, :insert_job, :stop],
+      %{duration: 1},
+      %{
+        conf: %{name: Oban, prefix: "elsewhere", repo: QueueKeeperCheck.LiteRepo},
+        job: %Oban.Job{id: 3, worker: "Argus.OtherPrefix", inserted_at: @now, conflict?: false}
+      },
+      ledger
+    )
+
+    :ok = Ledger.flush(ledger)
+    {:ok, %{sightings: sightings}} = Ledger.fetch(@repo, prefix: @prefix)
+    assert Map.keys(sightings) |> Enum.sort() == ["Argus.Local"]
+  end
+
+  @tag :qk041
+  test "oban_name :all still records every instance of the intended repo", %{ledger: ledger} do
+    for {name, id, worker} <- [{Oban, 11, "Argus.Default"}, {:oban_secondary, 12, "Argus.Second"}] do
+      Ledger.handle_event(
+        [:oban, :engine, :insert_job, :stop],
+        %{duration: 1},
+        %{
+          conf: %{name: name, prefix: @prefix, repo: @repo},
+          job: %Oban.Job{id: id, worker: worker, inserted_at: @now, conflict?: false}
+        },
+        ledger
+      )
+    end
+
+    :ok = Ledger.flush(ledger)
+    {:ok, %{sightings: sightings}} = Ledger.fetch(@repo, prefix: @prefix)
+    assert Map.has_key?(sightings, "Argus.Default")
+    assert Map.has_key?(sightings, "Argus.Second")
+  end
+
+  @tag :qk041
+  test "malformed or missing repo metadata is not recorded", %{ledger: ledger} do
+    Ledger.handle_event(
+      [:oban, :engine, :insert_job, :stop],
+      %{duration: 1},
+      %{
+        conf: %{name: Oban, prefix: @prefix},
+        job: %Oban.Job{id: 21, worker: "Argus.NoRepo", inserted_at: @now, conflict?: false}
+      },
+      ledger
+    )
+
+    Ledger.handle_event(
+      [:oban, :engine, :insert_job, :stop],
+      %{duration: 1},
+      %{
+        job: %Oban.Job{id: 22, worker: "Argus.NoConf", inserted_at: @now, conflict?: false}
+      },
+      ledger
+    )
+
+    :ok = Ledger.flush(ledger)
+    {:ok, %{sightings: sightings}} = Ledger.fetch(@repo, prefix: @prefix)
+    refute Map.has_key?(sightings, "Argus.NoRepo")
+    refute Map.has_key?(sightings, "Argus.NoConf")
+  end
+
+  @tag :qk041
+  test "a shorter candidate override is honored against ledger history" do
+    started = DateTime.add(@now, -3 * 86_400, :second)
+    seed_meta(started)
+    seed_sighting("Argus.Candidate", DateTime.add(@now, -2 * 86_400, :second), 1)
+
+    report =
+      QueueKeeperCheck.run(@repo,
+        now: @now,
+        only: [:dead_worker_candidates],
+        dead_worker_candidates: [
+          window_days: 7,
+          overrides: %{"Argus.Candidate" => 1},
+          known: ["Argus.Candidate"],
+          use_ledger: true,
+          scan: [apps: [], callers: %{}, cron: [], complete: true]
+        ]
+      )
+
+    assert report.errors == []
+    [finding] = Enum.filter(report.findings, &(&1.check == :dead_worker_candidates))
+    assert finding.worker == "Argus.Candidate"
+    assert finding.reason == :high_confidence
+    assert finding.threshold == 86_400
+    assert finding.value == 2 * 86_400
+  end
+
+  @tag :qk041
+  test "a longer ledger override remains insufficient when history is shorter than it" do
+    started = DateTime.add(@now, -3 * 86_400, :second)
+    seed_meta(started)
+    seed_sighting("Argus.Long", DateTime.add(@now, -2 * 86_400, :second), 2)
+
+    report =
+      QueueKeeperCheck.run(@repo,
+        now: @now,
+        only: [:dead_worker_candidates],
+        dead_worker_candidates: [
+          window_days: 1,
+          overrides: %{"Argus.Long" => 14},
+          known: ["Argus.Long"],
+          use_ledger: true,
+          scan: [apps: [], callers: %{}, cron: [], complete: true]
+        ]
+      )
+
+    assert report.errors == []
+    findings = Enum.filter(report.findings, &(&1.check == :dead_worker_candidates))
+    # Not high confidence: either omitted (not inactive vs 14d) or insufficient_history.
+    refute Enum.any?(findings, &(&1.reason == :high_confidence))
+  end
+
   defp emit_insert_job(ledger, worker, at, id) do
     Ledger.handle_event(
       [:oban, :engine, :insert_job, :stop],

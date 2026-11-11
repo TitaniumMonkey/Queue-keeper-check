@@ -18,9 +18,11 @@ defmodule QueueKeeperCheck.PostgresSafetyTest do
           "DROP SCHEMA IF EXISTS qk_ro CASCADE",
           "DROP SCHEMA IF EXISTS qk_lock CASCADE",
           "DROP SCHEMA IF EXISTS qk_legacy CASCADE",
+          "DROP SCHEMA IF EXISTS qk_noleger CASCADE",
           "CREATE SCHEMA qk_ro",
           "CREATE SCHEMA qk_lock",
           "CREATE SCHEMA qk_legacy",
+          "CREATE SCHEMA qk_noleger",
           "CREATE TABLE qk_ro.oban_jobs (LIKE public.oban_jobs INCLUDING ALL)",
           "CREATE TABLE qk_lock.oban_jobs (LIKE public.oban_jobs INCLUDING ALL)",
           # an older Oban schema: no discarded_at / cancelled_at columns
@@ -32,6 +34,8 @@ defmodule QueueKeeperCheck.PostgresSafetyTest do
           FROM generate_series(1, 6)
           """,
           "INSERT INTO qk_lock.oban_jobs (state, queue, worker, args) VALUES ('available', 'default', 'Demo.W', '{}')",
+          "CREATE TABLE qk_noleger.oban_jobs (LIKE public.oban_jobs INCLUDING ALL)",
+          "INSERT INTO qk_noleger.oban_jobs (state, queue, worker, args, attempt, inserted_at, scheduled_at, completed_at) VALUES ('completed', 'default', 'Demo.Recent', '{}', 1, now() - interval '60 seconds', now() - interval '60 seconds', now() - interval '50 seconds')",
           # least-privilege role: connect + SELECT on one table, nothing else
           "DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'qk_readonly') THEN CREATE ROLE qk_readonly LOGIN PASSWORD 'qk-readonly-test-pw'; END IF; END $$",
           "GRANT CONNECT ON DATABASE queue_keeper_check_test TO qk_readonly",
@@ -42,7 +46,12 @@ defmodule QueueKeeperCheck.PostgresSafetyTest do
 
     on_exit(fn ->
       pg = pg!()
-      Postgrex.query!(pg, "DROP SCHEMA IF EXISTS qk_ro, qk_lock, qk_legacy CASCADE", [])
+
+      Postgrex.query!(
+        pg,
+        "DROP SCHEMA IF EXISTS qk_ro, qk_lock, qk_legacy, qk_noleger CASCADE",
+        []
+      )
 
       Postgrex.query!(
         pg,
@@ -160,6 +169,35 @@ defmodule QueueKeeperCheck.PostgresSafetyTest do
 
     {write_micros, _} = Task.await(task)
     assert write_micros < 500_000
+  end
+
+  @tag :qk041
+  test "dead_workers and candidates fall back on a prefix that has no ledger tables" do
+    workers =
+      QueueKeeperCheck.run(TestRepo,
+        now: @now,
+        prefix: "qk_noleger",
+        only: [:dead_workers],
+        dead_workers: [window_days: 7, known: ["Argus.Worker"]]
+      )
+
+    assert workers.errors == []
+    assert workers.status in [:ok, :warning]
+
+    candidates =
+      QueueKeeperCheck.run(TestRepo,
+        now: @now,
+        prefix: "qk_noleger",
+        only: [:dead_worker_candidates],
+        dead_worker_candidates: [
+          window_days: 7,
+          known: ["Argus.Worker"],
+          scan: [apps: [], callers: %{}, cron: [], complete: true]
+        ]
+      )
+
+    assert candidates.errors == []
+    assert candidates.status in [:ok, :warning]
   end
 
   test "refuses to run inside the caller's transaction and leaves it intact" do

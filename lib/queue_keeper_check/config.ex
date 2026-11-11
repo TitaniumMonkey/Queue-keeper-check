@@ -362,11 +362,4 @@ defmodule QueueKeeperCheck.Config do
           "#{inspect(check)} #{inspect(key)} must be a non-negative integer, got: #{inspect(v)}"
         )
   end
-
-  defp validate!(check, key, v),
-    do:
-      raise(
-        ArgumentError,
-        "#{inspect(check)} #{inspect(key)} must be a boolean, got: #{inspect(v)}"
-      )
 end

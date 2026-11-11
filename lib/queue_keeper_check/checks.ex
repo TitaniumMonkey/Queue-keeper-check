@@ -65,7 +65,14 @@ defmodule QueueKeeperCheck.Checks do
   # One aggregate per distinct budget: workers without an explicit budget share the default.
   # `age > budget` <=> `attempted_at <= now - (budget + 1)` (ages are whole seconds).
   def hanging(repo, cfg, now, qopts) do
-    orphan_cutoff = DateTime.add(now, -cfg[:orphaned][:after], :second)
+    # When :orphaned is also running, exclude jobs at/past the orphan cutoff so
+    # they are not reported twice. When :orphaned is disabled, hanging must still
+    # report over-budget jobs regardless of how old they are.
+    orphan_cutoff =
+      if orphaned_check_enabled?() do
+        DateTime.add(now, -cfg[:orphaned][:after], :second)
+      end
+
     budgets = cfg[:hanging][:budgets]
     default = cfg[:hanging][:default_budget]
     named = Map.keys(budgets)
@@ -97,12 +104,24 @@ defmodule QueueKeeperCheck.Checks do
     end
   end
 
+  defp hanging_base(nil, budget_cutoff) do
+    from(j in Job, where: j.state == "executing" and j.attempted_at <= ^budget_cutoff)
+  end
+
   defp hanging_base(orphan_cutoff, budget_cutoff) do
     from(j in Job,
       where:
         j.state == "executing" and j.attempted_at > ^orphan_cutoff and
           j.attempted_at <= ^budget_cutoff
     )
+  end
+
+  # Direct Checks.hanging/4 (no run/2 memo) keeps the historical dedup bound.
+  defp orphaned_check_enabled? do
+    case Process.get({__MODULE__, :only}) do
+      nil -> true
+      only -> :orphaned in only
+    end
   end
 
   defp scope_workers(base, :default, []), do: base
@@ -133,11 +152,7 @@ defmodule QueueKeeperCheck.Checks do
         latency = age(oldest, now),
         count > max_depth or latency > max_latency do
       {value, threshold, what} =
-        if latency > max_latency,
-          do:
-            {latency, max_latency,
-             "oldest due job waiting #{latency}s (limit #{max_latency}s), #{count} due"},
-          else: {count, max_depth, "#{count} due jobs (limit #{max_depth})"}
+        backlog_evidence(count, max_depth, latency, max_latency)
 
       %Finding{
         check: :backlog,
@@ -151,6 +166,50 @@ defmodule QueueKeeperCheck.Checks do
       }
     end
   end
+
+  # Prefer the strongest breached dimension (critical over warning; then higher
+  # ratio). A zero threshold that has already been breached is treated as an
+  # infinite ratio so we never divide by zero.
+  defp backlog_evidence(count, max_depth, latency, max_latency) do
+    depth? = count > max_depth
+    latency? = latency > max_latency
+
+    depth = {count, max_depth, "#{count} due jobs (limit #{max_depth})"}
+
+    latency_ev =
+      {latency, max_latency,
+       "oldest due job waiting #{latency}s (limit #{max_latency}s), #{count} due"}
+
+    cond do
+      depth? and latency? ->
+        if stronger_breach?(latency, max_latency, count, max_depth),
+          do: latency_ev,
+          else: depth
+
+      latency? ->
+        latency_ev
+
+      true ->
+        depth
+    end
+  end
+
+  defp stronger_breach?(left_value, left_threshold, right_value, right_threshold) do
+    left_rank = severity_rank(left_value, left_threshold)
+    right_rank = severity_rank(right_value, right_threshold)
+
+    left_rank > right_rank or
+      (left_rank == right_rank and
+         breach_ratio(left_value, left_threshold) >
+           breach_ratio(right_value, right_threshold))
+  end
+
+  defp severity_rank(_value, 0), do: 2
+  defp severity_rank(value, threshold) when value >= 2 * threshold, do: 2
+  defp severity_rank(_value, _threshold), do: 1
+
+  defp breach_ratio(_value, 0), do: :infinity
+  defp breach_ratio(value, threshold), do: value / threshold
 
   # A late queue is "active" when any of its jobs was attempted within the window. Nothing
   # indexes attempted_at, so this runs only for late queues (usually none), as a series of
@@ -196,8 +255,12 @@ defmodule QueueKeeperCheck.Checks do
           j.state in ["scheduled", "retryable"] and j.scheduled_at >= ^cutoff and
             j.attempted_at >= ^cutoff
       ),
-      from(j in Job, where: j.state == "discarded" and j.discarded_at >= ^cutoff),
-      from(j in Job, where: j.state == "cancelled" and j.cancelled_at >= ^cutoff),
+      from(j in Job,
+        where: j.state == "discarded" and j.discarded_at >= ^cutoff and j.attempted_at >= ^cutoff
+      ),
+      from(j in Job,
+        where: j.state == "cancelled" and j.cancelled_at >= ^cutoff and j.attempted_at >= ^cutoff
+      ),
       from(j in Job,
         where: j.state == "completed" and j.scheduled_at >= ^since and j.attempted_at >= ^cutoff
       )
@@ -238,13 +301,15 @@ defmodule QueueKeeperCheck.Checks do
   end
 
   @doc false
-  def with_memo(fun) do
+  def with_memo(fun, opts \\ []) do
     Process.put({__MODULE__, :memo}, %{})
+    Process.put({__MODULE__, :only}, Keyword.get(opts, :only))
 
     try do
       fun.()
     after
       Process.delete({__MODULE__, :memo})
+      Process.delete({__MODULE__, :only})
     end
   end
 
@@ -590,13 +655,12 @@ defmodule QueueKeeperCheck.Checks do
 
   defp dead_worker_candidates_run(repo, cfg, now, qopts, default_days) do
     dwc = cfg[:dead_worker_candidates]
-    window_secs = QueueKeeperCheck.DeadWorkerCandidates.window_seconds(default_days)
 
     skip =
       MapSet.new(dwc[:ignore])
       |> MapSet.union(MapSet.new(Map.keys(cfg[:cron_missing][:expected])))
 
-    {source, history_secs, latest} = dead_workers_activity(repo, dwc, now, qopts)
+    {_source, history_secs, latest} = dead_workers_activity(repo, dwc, now, qopts)
     pending = pending_by_worker(repo, qopts)
 
     scan = List.wrap(dwc[:scan])
@@ -617,115 +681,95 @@ defmodule QueueKeeperCheck.Checks do
           {%{}, %{complete?: false}}
       end
 
-    # History shorter than the default window: unknown, not inactivity.
-    if history_secs < window_secs do
-      history_desc = if history_secs > 0, do: "#{history_secs}s", else: "none"
-      source_desc = if source == :ledger, do: "ledger recording age", else: "finished-job history"
+    # Per-worker windows (including shorter overrides) are evaluated in
+    # classify/1 via history_ok?. A short default window must not hide a
+    # worker whose override still fits the observed history, and a long
+    # override must still be insufficient when history is shorter than it.
+    candidates =
+      latest
+      |> Map.keys()
+      |> Enum.concat(dwc[:known])
+      |> Enum.concat(if(dwc[:discover], do: discovered_workers(), else: []))
+      |> Enum.concat(Map.keys(scan_by))
+      |> Enum.uniq()
+      |> Enum.reject(&MapSet.member?(skip, &1))
+      |> Enum.sort()
 
-      [
-        %Finding{
-          check: :dead_worker_candidates,
-          severity: :warning,
-          reason: :insufficient_history,
-          count: 0,
-          value: history_secs,
-          threshold: window_secs,
-          message:
-            "dead_worker_candidates window (#{default_days} days / #{window_secs}s) exceeds " <>
-              "observable #{source_desc} (#{history_desc}). This is unknown, not proof of " <>
-              "inactivity (new environment, short ledger, or aggressive pruning). " <>
-              "Do not raise Pruner max_age just for this check; attach the ledger, or shrink " <>
-              "window_days. Static references are not enough to call a worker dead, and " <>
-              "the absence of references is not a high-confidence finding without history."
-        }
-      ]
-    else
-      candidates =
-        latest
-        |> Map.keys()
-        |> Enum.concat(dwc[:known])
-        |> Enum.concat(if(dwc[:discover], do: discovered_workers(), else: []))
-        |> Enum.concat(Map.keys(scan_by))
-        |> Enum.uniq()
-        |> Enum.reject(&MapSet.member?(skip, &1))
-        |> Enum.sort()
+    for worker <- candidates,
+        days = Map.get(dwc[:overrides], worker, default_days),
+        worker_window = QueueKeeperCheck.DeadWorkerCandidates.window_seconds(days) do
+      {at, id, n} = Map.get(latest, worker, {nil, nil, 0})
 
-      for worker <- candidates,
-          days = Map.get(dwc[:overrides], worker, default_days),
-          worker_window = QueueKeeperCheck.DeadWorkerCandidates.window_seconds(days) do
-        {at, id, n} = Map.get(latest, worker, {nil, nil, 0})
+      {pending_status, pending_count, next_at, pending_id} =
+        case pending do
+          {:ok, map} ->
+            {pn, pat, pid} = Map.get(map, worker, {0, nil, nil})
+            {:ok, pn, pat, pid}
 
-        {pending_status, pending_count, next_at, pending_id} =
-          case pending do
-            {:ok, map} ->
-              {pn, pat, pid} = Map.get(map, worker, {0, nil, nil})
-              {:ok, pn, pat, pid}
-
-            :error ->
-              {:error, 0, nil, nil}
-          end
-
-        {static, static_reason, static_files} =
-          case Map.get(scan_by, worker) do
-            %{status: :live, reason: reason, files: files} ->
-              {:referenced, reason, files}
-
-            %{status: :review_candidate, reason: reason, files: files} ->
-              {:unreferenced, reason, files}
-
-            nil ->
-              {:not_in_scan, nil, []}
-          end
-
-        # `:complete` on scan: is a test/operator override. Injected `:callers`
-        # otherwise make DeadCode.scan_report/1 report complete?: false.
-        scan_complete? =
-          case Keyword.get(scan, :complete) do
-            flag when is_boolean(flag) -> flag
-            _ -> coverage[:complete?] == true
-          end
-
-        attrs = %{
-          worker: worker,
-          history_secs: history_secs,
-          window_secs: worker_window,
-          window_days: days,
-          now: now,
-          last_inserted_at: at,
-          pending_status: pending_status,
-          pending_count: pending_count,
-          next_scheduled_at: next_at,
-          static: static,
-          static_reason: static_reason,
-          static_files: static_files,
-          scan_complete?: scan_complete?
-        }
-
-        case QueueKeeperCheck.DeadWorkerCandidates.classify(attrs) do
-          :omit ->
-            nil
-
-          {reason, message} ->
-            job_ids =
-              [id, pending_id]
-              |> Enum.reject(&is_nil/1)
-              |> Enum.uniq()
-
-            %Finding{
-              check: :dead_worker_candidates,
-              severity: :warning,
-              reason: reason,
-              worker: worker,
-              count: max(n, pending_count),
-              value: QueueKeeperCheck.DeadWorkerCandidates.age(at, now),
-              threshold: worker_window,
-              job_ids: job_ids,
-              message: message
-            }
+          :error ->
+            {:error, 0, nil, nil}
         end
+
+      {static, static_reason, static_files} =
+        case Map.get(scan_by, worker) do
+          %{status: :live, reason: reason, files: files} ->
+            {:referenced, reason, files}
+
+          %{status: :review_candidate, reason: reason, files: files} ->
+            {:unreferenced, reason, files}
+
+          nil ->
+            {:not_in_scan, nil, []}
+        end
+
+      # `:complete` on scan: is a test/operator override. Injected `:callers`
+      # otherwise make DeadCode.scan_report/1 report complete?: false.
+      scan_complete? =
+        case Keyword.get(scan, :complete) do
+          flag when is_boolean(flag) -> flag
+          _ -> coverage[:complete?] == true
+        end
+
+      attrs = %{
+        worker: worker,
+        history_secs: history_secs,
+        window_secs: worker_window,
+        window_days: days,
+        now: now,
+        last_inserted_at: at,
+        pending_status: pending_status,
+        pending_count: pending_count,
+        next_scheduled_at: next_at,
+        static: static,
+        static_reason: static_reason,
+        static_files: static_files,
+        scan_complete?: scan_complete?
+      }
+
+      case QueueKeeperCheck.DeadWorkerCandidates.classify(attrs) do
+        :omit ->
+          nil
+
+        {reason, message} ->
+          job_ids =
+            [id, pending_id]
+            |> Enum.reject(&is_nil/1)
+            |> Enum.uniq()
+
+          %Finding{
+            check: :dead_worker_candidates,
+            severity: :warning,
+            reason: reason,
+            worker: worker,
+            count: max(n, pending_count),
+            value: QueueKeeperCheck.DeadWorkerCandidates.age(at, now),
+            threshold: worker_window,
+            job_ids: job_ids,
+            message: message
+          }
       end
-      |> Enum.reject(&is_nil/1)
     end
+    |> Enum.reject(&is_nil/1)
   end
 
   # -- persisted jobs (opt-in inventory reconciliation) -----------------------------------

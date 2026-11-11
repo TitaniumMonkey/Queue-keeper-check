@@ -139,4 +139,73 @@ defmodule QueueKeeperCheck.DeadCodeTest do
              known: ["UpdateBot", "QueueKeeperCheck.UpdateBot"]
            ) == ["QueueKeeperCheck.UpdateBot", "UpdateBot"]
   end
+
+  @tag :qk041
+  test "missing requested beam roots or paths make coverage incomplete" do
+    src = :code.which(QueueKeeperCheck.DeadCodeEnqueuer)
+    assert is_list(src), "expected a compiled fixture beam on the code path"
+
+    tmp = Path.join(System.tmp_dir!(), "qk_scan_#{System.unique_integer([:positive])}")
+    File.mkdir_p!(tmp)
+    on_exit(fn -> File.rm_rf!(tmp) end)
+
+    dest = Path.join(tmp, "Elixir.QueueKeeperCheck.DeadCodeEnqueuer.beam")
+    File.cp!(List.to_string(src), dest)
+
+    missing_dir = Path.join(tmp, "does_not_exist")
+    missing_file = Path.join(tmp, "missing.beam")
+
+    report =
+      DeadCode.scan_report(
+        apps: [],
+        known: ["QueueKeeperCheck.DeadCodeAbandonedWorker"],
+        beam_roots: [tmp, missing_dir],
+        beam_paths: [missing_file]
+      )
+
+    assert report.coverage.beams_scanned >= 1
+    assert report.coverage.beams_ok >= 1
+    refute report.coverage.complete?
+    assert report.coverage[:requested_missing] >= 2
+    by = Map.new(report.workers, &{&1.worker, &1})
+    assert by["QueueKeeperCheck.DeadCodeAbandonedWorker"].status == :review_candidate
+  end
+
+  @tag :qk041
+  test "all requested beam roots missing is incomplete, not a complete empty scan" do
+    missing = Path.join(System.tmp_dir!(), "qk_missing_#{System.unique_integer([:positive])}")
+
+    report =
+      DeadCode.scan_report(
+        apps: [],
+        known: ["QueueKeeperCheck.DeadCodeAbandonedWorker"],
+        beam_roots: [missing]
+      )
+
+    assert report.coverage.beams_scanned == 0
+    refute report.coverage.complete?
+    assert report.coverage[:requested_missing] >= 1
+  end
+
+  @tag :qk041
+  test "a healthy requested root is still complete when every path exists" do
+    src = :code.which(QueueKeeperCheck.DeadCodeEnqueuer)
+    assert is_list(src)
+    tmp = Path.join(System.tmp_dir!(), "qk_ok_#{System.unique_integer([:positive])}")
+    File.mkdir_p!(tmp)
+    on_exit(fn -> File.rm_rf!(tmp) end)
+    File.cp!(List.to_string(src), Path.join(tmp, "Elixir.QueueKeeperCheck.DeadCodeEnqueuer.beam"))
+
+    report =
+      DeadCode.scan_report(
+        apps: [],
+        known: ["QueueKeeperCheck.DeadCodeAbandonedWorker"],
+        beam_roots: [tmp]
+      )
+
+    assert report.coverage.complete?
+    assert report.coverage.beams_scanned >= 1
+    assert report.coverage.beams_ok >= 1
+    assert report.coverage[:requested_missing] in [nil, 0]
+  end
 end

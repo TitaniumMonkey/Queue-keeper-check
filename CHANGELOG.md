@@ -6,6 +6,46 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-11-11
+
+### Fixed
+
+- Ledger `fetch/2` no longer aborts a Postgres read-only transaction when the
+  optional ledger tables are missing (`ERROR 25P02 in_failed_sql_transaction`).
+  Existence is probed first (`to_regclass` on Postgres; catalog tables on
+  SQLite and MySQL). If either table is absent, the check falls back to
+  `oban_jobs`. Genuine permission or connectivity errors are still raised.
+- `:backlog` severity now follows the strongest breached dimension. A queue
+  whose depth is critical is no longer downgraded to a warning just because
+  latency also exceeds its (lower) warning threshold.
+- `:stalled` no longer treats a cancelled or discarded job as evidence that a
+  consumer is running unless that job was also attempted inside the lookback
+  window. Cancelling an unattempted job, or a stale attempt with a recent
+  cancel/discard, does not hide a stalled queue.
+- The opt-in ledger records telemetry only for the configured repository.
+  Events from another repo that share the same prefix, or events with missing
+  or malformed repo metadata, are ignored. `:oban_name :all` still records
+  every Oban name on the intended repo.
+- `:dead_worker_candidates` honors a shorter per-worker `overrides` window
+  even when the default `window_days` is longer than observed history. A
+  longer override is still insufficient when history does not cover it.
+  Insufficient-history findings are now emitted per worker rather than as a
+  single global finding that hid shorter overrides.
+- Explicitly requested `beam_roots` or `beam_paths` that do not exist make
+  static-scan coverage incomplete (`requested_missing`), so they cannot produce
+  a `:high_confidence` combined finding. Default compile directories that are
+  absent are not counted.
+- `:hanging` still reports over-budget executing jobs when `:orphaned` is not
+  in the run (`only: [:hanging]`). The orphan-age upper bound is kept only as
+  a dedup when both checks run.
+
+### Changed
+
+- Removed a dead `Config.validate!/3` clause and a redundant type check that
+  Elixir 1.20 warned about. The supported Elixir baseline remains `~> 1.15`.
+- The documented Hex dependency version is `~> 0.4.1`. The Hex package itself
+  will be published after this GitHub tag is tested.
+
 ## [0.4.0] - 2026-11-10
 
 ### Added
@@ -192,7 +232,8 @@ Initial implementation. Not tagged, released or published; superseded by 0.2.0.
   outside Oban (e.g. system cron).
 - Support for Oban's Basic (PostgreSQL), Lite (SQLite3) and Dolphin (MySQL 8.4+) engines.
 
-[Unreleased]: https://github.com/TitaniumMonkey/Queue-keeper-check/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/TitaniumMonkey/Queue-keeper-check/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/TitaniumMonkey/Queue-keeper-check/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/TitaniumMonkey/Queue-keeper-check/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/TitaniumMonkey/Queue-keeper-check/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/TitaniumMonkey/Queue-keeper-check/releases/tag/v0.2.1

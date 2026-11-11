@@ -47,6 +47,25 @@ defmodule QueueKeeperCheck.SharedCases do
 
       defp only(report, check), do: Enum.filter(report.findings, &(&1.check == check))
 
+      defp drop_ledger_tables do
+        case @adapter do
+          Ecto.Adapters.Postgres ->
+            @repo.query!(
+              "DROP TABLE IF EXISTS public.queue_keeper_worker_sightings, public.queue_keeper_ledger_meta"
+            )
+
+          Ecto.Adapters.MyXQL ->
+            # MySQL DDL implicitly commits and cannot be rolled back by the
+            # sandbox, so this helper is a no-op there. Missing-ledger fallback
+            # is covered on Postgres (including a dedicated prefix) and SQLite.
+            :ok
+
+          _ ->
+            @repo.query!("DROP TABLE IF EXISTS queue_keeper_worker_sightings")
+            @repo.query!("DROP TABLE IF EXISTS queue_keeper_ledger_meta")
+        end
+      end
+
       test "healthy queues produce no findings" do
         insert_many(50, %{})
         insert_many(3, state: "executing", attempted_at: ago(5), completed_at: nil)
@@ -127,6 +146,93 @@ defmodule QueueKeeperCheck.SharedCases do
                  only(report, :hanging)
       end
 
+      @tag :qk041
+      test "hanging-only still reports a job that has passed the orphan cutoff" do
+        insert(
+          state: "executing",
+          worker: "Demo.Import",
+          attempted_at: ago(4000),
+          completed_at: nil
+        )
+
+        report = run(only: [:hanging])
+
+        assert [
+                 %Finding{
+                   check: :hanging,
+                   worker: "Demo.Import",
+                   value: 4000,
+                   threshold: 300,
+                   severity: :critical
+                 }
+               ] = only(report, :hanging)
+
+        assert report.errors == []
+        assert report.status == :critical
+      end
+
+      @tag :qk041
+      test "hanging-only reports just below, at, and above the orphan cutoff, including budgets" do
+        insert(
+          state: "executing",
+          worker: "Demo.Under",
+          attempted_at: ago(3599),
+          completed_at: nil
+        )
+
+        insert(state: "executing", worker: "Demo.At", attempted_at: ago(3600), completed_at: nil)
+
+        insert(
+          state: "executing",
+          worker: "Demo.Over",
+          attempted_at: ago(4000),
+          completed_at: nil
+        )
+
+        insert(
+          state: "executing",
+          worker: "Demo.Video",
+          attempted_at: ago(4000),
+          completed_at: nil
+        )
+
+        hanging_only =
+          run(
+            only: [:hanging],
+            hanging: [default_budget: 300, budgets: %{"Demo.Video" => 10_000}]
+          )
+          |> only(:hanging)
+          |> Map.new(&{&1.worker, &1})
+
+        assert hanging_only["Demo.Under"].value == 3599
+        assert hanging_only["Demo.At"].value == 3600
+        assert hanging_only["Demo.Over"].value == 4000
+        # Per-worker budget 10_000s: 4000s is still within budget.
+        refute Map.has_key?(hanging_only, "Demo.Video")
+
+        orphaned_only =
+          run(only: [:orphaned])
+          |> only(:orphaned)
+          |> Map.new(&{&1.worker, &1})
+
+        # Default orphan after is 3600; age is strict `>` in hanging comments, check exact
+        # orphan behaviour: 4000 is included. 3599 is not. 3600 may or may not depending
+        # on the existing `>` / `>=` cutoff (attempted_at <= now - after).
+        assert Map.has_key?(orphaned_only, "Demo.Over")
+        refute Map.has_key?(orphaned_only, "Demo.Under")
+
+        both = run(only: [:hanging, :orphaned])
+        orphaned_workers = both |> only(:orphaned) |> Enum.map(& &1.worker)
+        hanging_workers = both |> only(:hanging) |> Enum.map(& &1.worker)
+        # Dedup: jobs at or past the orphan cutoff (age >= 3600) are orphaned, not hanging.
+        assert "Demo.Under" in hanging_workers
+        refute "Demo.Under" in orphaned_workers
+        assert "Demo.At" in orphaned_workers
+        refute "Demo.At" in hanging_workers
+        assert "Demo.Over" in orphaned_workers
+        refute "Demo.Over" in hanging_workers
+      end
+
       test "backlog: depth over the limit" do
         insert_many(12,
           state: "available",
@@ -184,6 +290,104 @@ defmodule QueueKeeperCheck.SharedCases do
                  }
                ] =
                  only(run(), :backlog)
+      end
+
+      @tag :qk041
+      test "backlog: a critically deep queue stays critical when latency also exceeds its limit" do
+        insert_many(2001,
+          state: "available",
+          queue: "deep",
+          scheduled_at: ago(301),
+          attempted_at: nil,
+          completed_at: nil
+        )
+
+        [finding] = only(run(only: [:backlog]), :backlog)
+        assert finding.queue == "deep"
+        assert finding.count == 2001
+        assert finding.severity == :critical
+        assert finding.value == 2001
+        assert finding.threshold == 1000
+        assert finding.message =~ "2001 due jobs"
+      end
+
+      @tag :qk041
+      test "backlog: severity follows the strongest dimension, including exact 2x bounds" do
+        # Depth-only, exactly 2x -> critical (count 20, max_depth 10, latency well under).
+        insert_many(20,
+          state: "available",
+          queue: "depth_only",
+          scheduled_at: ago(5),
+          attempted_at: nil,
+          completed_at: nil
+        )
+
+        [depth] =
+          only(run(only: [:backlog], backlog: [max_depth: 10, max_latency: 300]), :backlog)
+
+        assert depth.queue == "depth_only"
+        assert depth.count == 20
+        assert depth.value == 20
+        assert depth.threshold == 10
+        assert depth.severity == :critical
+
+        # Latency-only, exactly 2x -> critical (count under depth, latency 600, max 300).
+        insert(
+          state: "available",
+          queue: "latency_only",
+          scheduled_at: ago(600),
+          attempted_at: nil,
+          completed_at: nil
+        )
+
+        [lat] =
+          only(run(only: [:backlog], backlog: [max_depth: 1000, max_latency: 300]), :backlog)
+          |> Enum.filter(&(&1.queue == "latency_only"))
+
+        assert lat.value == 600
+        assert lat.threshold == 300
+        assert lat.severity == :critical
+        assert lat.message =~ "waiting 600s"
+
+        # Both breached; depth is 2x (critical) and latency is just over 1x (warning).
+        insert_many(20,
+          state: "available",
+          queue: "both",
+          scheduled_at: ago(301),
+          attempted_at: nil,
+          completed_at: nil
+        )
+
+        [both] =
+          only(run(only: [:backlog], backlog: [max_depth: 10, max_latency: 300]), :backlog)
+          |> Enum.filter(&(&1.queue == "both"))
+
+        assert both.severity == :critical
+        assert both.value == 20
+        assert both.threshold == 10
+      end
+
+      @tag :qk041
+      test "backlog: aging a critically deep queue from 299s to 301s does not downgrade it" do
+        insert_many(2001,
+          state: "available",
+          queue: "aging",
+          scheduled_at: ago(299),
+          attempted_at: nil,
+          completed_at: nil
+        )
+
+        [early] = only(run(only: [:backlog]), :backlog)
+        assert early.severity == :critical
+        assert early.value == 2001
+        assert early.threshold == 1000
+
+        later = DateTime.add(@now, 2, :second)
+        [aged] = only(run(only: [:backlog], now: later), :backlog)
+        assert aged.severity == :critical
+        assert aged.count == 2001
+        assert aged.value == 2001
+        assert aged.threshold == 1000
       end
 
       test "stalled: due jobs waiting with no recent activity in the queue" do
@@ -270,6 +474,105 @@ defmodule QueueKeeperCheck.SharedCases do
 
         assert ["ancient"] = run() |> only(:stalled) |> Enum.map(& &1.queue)
         assert [] = run(stalled: [lookback: 200_000]) |> only(:stalled)
+      end
+
+      @tag :qk041
+      test "stalled: cancelling a job that never ran does not hide a stalled queue" do
+        insert_many(3,
+          state: "available",
+          queue: "ghost",
+          scheduled_at: ago(900),
+          attempted_at: nil,
+          completed_at: nil
+        )
+
+        insert(
+          state: "cancelled",
+          queue: "ghost",
+          cancelled_at: @now,
+          attempted_at: nil,
+          completed_at: nil
+        )
+
+        report = run(only: [:stalled])
+        assert [%Finding{check: :stalled, queue: "ghost"}] = only(report, :stalled)
+        assert report.errors == []
+      end
+
+      @tag :qk041
+      test "stalled: stale attempted_at plus a recent cancel or discard is not activity" do
+        insert_many(2,
+          state: "available",
+          queue: "stale_cancel",
+          scheduled_at: ago(900),
+          attempted_at: nil,
+          completed_at: nil
+        )
+
+        insert(
+          state: "cancelled",
+          queue: "stale_cancel",
+          cancelled_at: ago(1),
+          attempted_at: ago(10_000),
+          completed_at: nil
+        )
+
+        insert_many(2,
+          state: "available",
+          queue: "stale_discard",
+          scheduled_at: ago(900),
+          attempted_at: nil,
+          completed_at: nil
+        )
+
+        insert(
+          state: "discarded",
+          queue: "stale_discard",
+          discarded_at: ago(1),
+          attempted_at: ago(10_000),
+          completed_at: nil
+        )
+
+        stalled = run(only: [:stalled]) |> only(:stalled) |> Enum.map(& &1.queue) |> Enum.sort()
+        assert stalled == ["stale_cancel", "stale_discard"]
+      end
+
+      @tag :qk041
+      test "stalled: a recent attempt in cancelled, discarded, or executing still counts" do
+        for q <- ["recent_cancel", "recent_discard", "recent_exec"] do
+          insert_many(2,
+            state: "available",
+            queue: q,
+            scheduled_at: ago(900),
+            attempted_at: nil,
+            completed_at: nil
+          )
+        end
+
+        insert(
+          state: "cancelled",
+          queue: "recent_cancel",
+          cancelled_at: ago(1),
+          attempted_at: ago(2),
+          completed_at: nil
+        )
+
+        insert(
+          state: "discarded",
+          queue: "recent_discard",
+          discarded_at: ago(1),
+          attempted_at: ago(2),
+          completed_at: nil
+        )
+
+        insert(
+          state: "executing",
+          queue: "recent_exec",
+          attempted_at: ago(2),
+          completed_at: nil
+        )
+
+        assert only(run(only: [:stalled]), :stalled) == []
       end
 
       test "sample ids are capped per run, findings are not" do
@@ -1254,6 +1557,147 @@ defmodule QueueKeeperCheck.SharedCases do
         assert only(run(), :dead_worker_candidates) == []
       end
 
+      @tag :qk041
+      test "ledger-less fallback: missing ledger tables do not abort dead_workers or candidates" do
+        if @adapter == Ecto.Adapters.MyXQL do
+          # Covered on Postgres and SQLite; MySQL DDL would commit out of the sandbox.
+          assert true
+        else
+          drop_ledger_tables()
+
+          insert(worker: "Demo.Recent", inserted_at: ago(60), completed_at: ago(50))
+
+          workers =
+            run(
+              only: [:dead_workers],
+              dead_workers: [window_days: 7, known: ["Argus.Worker"]]
+            )
+
+          assert workers.errors == []
+          # History is short; the check stays silent rather than erroring.
+          assert workers.status in [:ok, :warning]
+
+          candidates =
+            run(
+              only: [:dead_worker_candidates],
+              dead_worker_candidates: [
+                window_days: 7,
+                known: ["Argus.Worker"],
+                scan: [apps: [], callers: %{}, cron: [], complete: true]
+              ]
+            )
+
+          assert candidates.errors == []
+          assert candidates.status in [:ok, :warning]
+          reasons = Enum.map(only(candidates, :dead_worker_candidates), & &1.reason)
+          assert :insufficient_history in reasons or reasons == []
+        end
+      end
+
+      @tag :qk041
+      test "empty existing ledger tables do not abort the default use_ledger path" do
+        # Tables exist (test helper migrates them) but recording has never started.
+        insert(worker: "Demo.Recent", inserted_at: ago(60), completed_at: ago(50))
+
+        workers =
+          run(
+            only: [:dead_workers],
+            dead_workers: [window_days: 7, known: ["Argus.Worker"]]
+          )
+
+        assert workers.errors == []
+
+        candidates =
+          run(
+            only: [:dead_worker_candidates],
+            dead_worker_candidates: [
+              window_days: 7,
+              known: ["Argus.Worker"],
+              scan: [apps: [], callers: %{}, cron: [], complete: true]
+            ]
+          )
+
+        assert candidates.errors == []
+      end
+
+      @tag :qk041
+      test "dead_worker_candidates: a shorter per-worker override is honored when the default window exceeds history" do
+        insert(
+          worker: "Demo.History",
+          inserted_at: ago(3 * 86_400),
+          completed_at: ago(3 * 86_400)
+        )
+
+        insert(
+          worker: "Argus.Candidate",
+          inserted_at: ago(2 * 86_400),
+          completed_at: ago(2 * 86_400)
+        )
+
+        report =
+          run(
+            only: [:dead_worker_candidates],
+            dead_worker_candidates: [
+              window_days: 7,
+              overrides: %{"Argus.Candidate" => 1},
+              known: ["Argus.Candidate"],
+              ignore: ["Demo.History"],
+              use_ledger: false,
+              scan: [apps: [], callers: %{}, cron: [], complete: true]
+            ]
+          )
+
+        assert report.errors == []
+        [finding] = only(report, :dead_worker_candidates)
+        assert finding.worker == "Argus.Candidate"
+        assert finding.reason == :high_confidence
+        assert finding.value == 2 * 86_400
+        assert finding.threshold == 86_400
+      end
+
+      @tag :qk041
+      test "dead_worker_candidates: mixed short, default and long windows are evaluated per worker" do
+        insert(
+          worker: "Demo.History",
+          inserted_at: ago(3 * 86_400),
+          completed_at: ago(3 * 86_400)
+        )
+
+        insert(
+          worker: "Argus.Short",
+          inserted_at: ago(2 * 86_400),
+          completed_at: ago(2 * 86_400)
+        )
+
+        insert(
+          worker: "Argus.Long",
+          inserted_at: ago(2 * 86_400),
+          completed_at: ago(2 * 86_400)
+        )
+
+        findings =
+          run(
+            only: [:dead_worker_candidates],
+            dead_worker_candidates: [
+              window_days: 7,
+              overrides: %{"Argus.Short" => 1, "Argus.Long" => 14},
+              known: ["Argus.Short", "Argus.Long"],
+              ignore: ["Demo.History"],
+              use_ledger: false,
+              scan: [apps: [], callers: %{}, cron: [], complete: true]
+            ]
+          )
+          |> only(:dead_worker_candidates)
+          |> Map.new(&{&1.worker || :global, &1})
+
+        assert findings["Argus.Short"].reason == :high_confidence
+        assert findings["Argus.Short"].threshold == 86_400
+        # 2-day-old job with a 14-day window is not inactive, so it is omitted.
+        refute Map.has_key?(findings, "Argus.Long")
+        # No lone global insufficient_history finding that suppresses the short override.
+        refute Map.has_key?(findings, :global)
+      end
+
       test "dead_worker_candidates: both signals with sufficient history are high confidence" do
         insert(
           worker: "Demo.History",
@@ -1398,7 +1842,7 @@ defmodule QueueKeeperCheck.SharedCases do
           )
 
         assert finding.reason == :insufficient_history
-        assert is_nil(finding.worker)
+        assert finding.worker == "Demo.NeverSeen"
         assert finding.message =~ "unknown, not proof of inactivity"
         refute finding.message =~ "Confidence: high"
       end

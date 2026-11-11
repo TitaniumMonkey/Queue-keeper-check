@@ -137,17 +137,20 @@ defmodule QueueKeeperCheck.Ledger do
     qopts = prefix_query_opts(repo, opts)
     adapter = repo.__adapter__()
 
-    case fetch_started_at(repo, prefix, adapter, qopts) do
-      {:ok, started_at} ->
-        sightings = fetch_sightings(repo, prefix, adapter, qopts)
-        {:ok, %{started_at: started_at, sightings: sightings, prefix: prefix}}
-
+    case ledger_tables_status(repo, adapter, qopts) do
       :absent ->
         :absent
+
+      :present ->
+        case fetch_started_at(repo, prefix, adapter, qopts) do
+          {:ok, started_at} ->
+            sightings = fetch_sightings(repo, prefix, adapter, qopts)
+            {:ok, %{started_at: started_at, sightings: sightings, prefix: prefix}}
+
+          :absent ->
+            :absent
+        end
     end
-  rescue
-    e ->
-      if missing_table?(e), do: :absent, else: reraise(e, __STACKTRACE__)
   end
 
   @doc false
@@ -300,8 +303,34 @@ defmodule QueueKeeperCheck.Ledger do
 
   defp accept_event?(meta, state) do
     conf = conf(meta)
-    name_ok?(conf, state.oban_name) and prefix_ok?(conf, state)
+    name_ok?(conf, state.oban_name) and prefix_ok?(conf, state) and repo_ok?(conf, state)
   end
+
+  # Oban typically puts the repo *module* in conf.repo. Compare modules (or a
+  # pid registered under that module). Do not call get_dynamic_repo/0 from the
+  # ledger process: that would accept whatever happens to be current here.
+  # Missing or malformed repo metadata is rejected so a foreign event cannot
+  # contaminate this repository's history.
+  defp repo_ok?(conf, state) do
+    case conf_repo(conf) do
+      nil -> false
+      event_repo -> same_repo?(event_repo, state.repo)
+    end
+  end
+
+  defp conf_repo(%{repo: repo}) when not is_nil(repo), do: repo
+  defp conf_repo(_), do: nil
+
+  defp same_repo?(left, right) when left == right, do: true
+
+  defp same_repo?(pid, module) when is_pid(pid) and is_atom(module) do
+    case Process.info(pid, :registered_name) do
+      {:registered_name, ^module} -> true
+      _ -> false
+    end
+  end
+
+  defp same_repo?(_, _), do: false
 
   defp name_ok?(_conf, :all), do: true
   defp name_ok?(%{name: name}, expected), do: name == expected
@@ -610,6 +639,34 @@ defmodule QueueKeeperCheck.Ledger do
     {sql, params}
   end
 
+  defp ledger_tables_status(repo, Ecto.Adapters.Postgres, qopts) do
+    schema = qopts[:prefix] || "public"
+    sql = "SELECT to_regclass($1), to_regclass($2)"
+
+    case repo.query!(sql, ["#{schema}.#{@meta}", "#{schema}.#{@sightings}"], query_opts()) do
+      %{rows: [[meta, sightings]]} when is_nil(meta) or is_nil(sightings) -> :absent
+      %{rows: [[_, _]]} -> :present
+    end
+  end
+
+  defp ledger_tables_status(repo, Ecto.Adapters.SQLite3, _qopts) do
+    sql = "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN (?, ?)"
+    names = table_names(repo.query!(sql, [@meta, @sightings], query_opts()))
+    if @meta in names and @sightings in names, do: :present, else: :absent
+  end
+
+  defp ledger_tables_status(repo, Ecto.Adapters.MyXQL, _qopts) do
+    sql = """
+    SELECT table_name FROM information_schema.tables
+    WHERE table_schema = DATABASE() AND table_name IN (?, ?)
+    """
+
+    names = table_names(repo.query!(sql, [@meta, @sightings], query_opts()))
+    if @meta in names and @sightings in names, do: :present, else: :absent
+  end
+
+  defp table_names(%{rows: rows}), do: Enum.map(rows, fn [name] -> to_string(name) end)
+
   defp fetch_started_at(repo, prefix, adapter, qopts) do
     table = quote_table(adapter, qopts, @meta)
     {sql, params} = select_eq(adapter, "SELECT started_at FROM #{table} WHERE prefix = ", prefix)
@@ -645,21 +702,4 @@ defmodule QueueKeeperCheck.Ledger do
   defp quote_table(_, _qopts, name), do: name
 
   defp query_opts, do: [timeout: 30_000]
-
-  # Adapter exception modules are not compile-time dependencies (postgrex / myxql /
-  # exqlite are brought in by the host app). Match on shape and message only.
-  defp missing_table?(%{postgres: %{code: :undefined_table}}), do: true
-  defp missing_table?(%{mysql: %{code: code}}) when code in [1146, 1051], do: true
-  defp missing_table?(%{reason: reason}), do: missing_table?(reason)
-
-  defp missing_table?(error) do
-    msg = exception_message(error)
-
-    is_binary(msg) and
-      (msg =~ "does not exist" or msg =~ "no such table" or msg =~ "UndefinedTable" or
-         msg =~ "undefined_table" or msg =~ "Unknown table")
-  end
-
-  defp exception_message(%{message: msg}) when is_binary(msg), do: msg
-  defp exception_message(error), do: Exception.message(error)
 end

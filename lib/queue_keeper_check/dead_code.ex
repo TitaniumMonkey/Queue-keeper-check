@@ -71,9 +71,12 @@ defmodule QueueKeeperCheck.DeadCode do
   from a confident empty caller list.
 
   Coverage keys: `:beams_scanned`, `:beams_ok`, `:beams_missing_debug_info`,
-  `:beams_unreadable`, `:compile_paths_empty`, `:apps`, `:complete?`.
-  `complete?` is true only when at least one beam was scanned and none were
-  missing debug info or unreadable.
+  `:beams_unreadable`, `:compile_paths_empty`, `:apps`, `:complete?`,
+  `:requested_missing`.
+  `complete?` is true only when at least one beam was scanned, none were
+  missing debug info or unreadable, and every explicitly requested
+  `beam_roots` / `beam_paths` entry existed. Default compile directories that
+  are absent are not counted as requested missing.
   """
   def scan_report(opts \\ []) when is_list(opts) do
     ignore = MapSet.new(List.wrap(opts[:ignore]))
@@ -91,7 +94,8 @@ defmodule QueueKeeperCheck.DeadCode do
           callers_of(workers, opts)
 
         injected ->
-          {injected, coverage(opts, _scanned = 0, _ok = 0, _missing = 0, _bad = 0)}
+          {injected,
+           coverage(opts, _scanned = 0, _ok = 0, _missing = 0, _bad = 0, _requested = 0)}
       end
 
     coverage =
@@ -236,7 +240,7 @@ defmodule QueueKeeperCheck.DeadCode do
   defp crontab_workers(_), do: []
 
   defp callers_of(workers, opts) do
-    paths = compile_beams(opts)
+    {paths, requested_missing} = compile_beams(opts)
 
     # Walk beams first so debug_info decoding can intern module atoms before
     # we resolve `:known` names. Never create atoms from worker-name strings
@@ -280,7 +284,7 @@ defmodule QueueKeeperCheck.DeadCode do
         end
       end)
 
-    {callers, coverage(opts, scanned, ok, missing, bad)}
+    {callers, coverage(opts, scanned, ok, missing, bad, requested_missing)}
   end
 
   defp existing_elixir_module(name) when is_binary(name) do
@@ -292,38 +296,45 @@ defmodule QueueKeeperCheck.DeadCode do
     end
   end
 
-  defp coverage(_opts, scanned, ok, missing, bad) do
+  defp coverage(_opts, scanned, ok, missing, bad, requested_missing) do
     %{
       beams_scanned: scanned,
       beams_ok: ok,
       beams_missing_debug_info: missing,
       beams_unreadable: bad,
       compile_paths_empty: scanned == 0,
-      complete?: scanned > 0 and missing == 0 and bad == 0
+      requested_missing: requested_missing,
+      complete?: scanned > 0 and missing == 0 and bad == 0 and requested_missing == 0
     }
   end
 
   defp compile_beams(opts) do
+    explicit_roots? = Keyword.has_key?(opts, :beam_roots)
+
     dirs =
       case opts[:beam_roots] do
         nil -> default_compile_dirs()
         roots -> List.wrap(roots)
       end
 
+    dirs = Enum.uniq(Enum.reject(dirs, &is_nil/1))
+
+    requested_missing_roots =
+      if explicit_roots?, do: Enum.count(dirs, &(not File.dir?(&1))), else: 0
+
     from_dirs =
-      for dir <- Enum.uniq(Enum.reject(dirs, &is_nil/1)),
+      for dir <- dirs,
           File.dir?(dir),
           file <- File.ls!(dir),
           String.ends_with?(file, ".beam"),
           do: Path.join(dir, file)
 
-    extras =
-      for path <- List.wrap(opts[:beam_paths]),
-          is_binary(path),
-          File.regular?(path),
-          do: path
+    requested_paths = Enum.filter(List.wrap(opts[:beam_paths]), &is_binary/1)
+    requested_missing_paths = Enum.count(requested_paths, &(not File.regular?(&1)))
 
-    Enum.uniq(from_dirs ++ extras)
+    extras = for path <- requested_paths, File.regular?(path), do: path
+
+    {Enum.uniq(from_dirs ++ extras), requested_missing_roots + requested_missing_paths}
   end
 
   defp default_compile_dirs do

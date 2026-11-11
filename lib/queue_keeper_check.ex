@@ -95,29 +95,32 @@ defmodule QueueKeeperCheck do
 
   defp run_checks(repo, cfg, now, qopts, guard, only) do
     {findings, errors} =
-      Checks.with_memo(fn ->
-        Enum.reduce(@checks, {[], []}, fn check, {findings, errors} ->
-          cond do
-            check not in only ->
-              {findings, errors}
+      Checks.with_memo(
+        fn ->
+          Enum.reduce(@checks, {[], []}, fn check, {findings, errors} ->
+            cond do
+              check not in only ->
+                {findings, errors}
 
-            Enum.any?(errors, &(&1.error == "DBConnection.ConnectionError")) ->
-              skipped = %{
-                check: check,
-                error: "skipped",
-                message: "skipped after a connection error"
-              }
+              Enum.any?(errors, &(&1.error == "DBConnection.ConnectionError")) ->
+                skipped = %{
+                  check: check,
+                  error: "skipped",
+                  message: "skipped after a connection error"
+                }
 
-              {findings, [skipped | errors]}
+                {findings, [skipped | errors]}
 
-            true ->
-              case run_check(repo, check, cfg, now, qopts, guard) do
-                {:ok, new} -> {findings ++ new, errors}
-                {:error, error} -> {findings, [error | errors]}
-              end
-          end
-        end)
-      end)
+              true ->
+                case run_check(repo, check, cfg, now, qopts, guard) do
+                  {:ok, new} -> {findings ++ new, errors}
+                  {:error, error} -> {findings, [error | errors]}
+                end
+            end
+          end)
+        end,
+        only: only
+      )
 
     {findings, Enum.reverse(errors)}
   end
